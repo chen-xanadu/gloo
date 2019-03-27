@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "gloo/algorithm.h"
 #include "gloo/context.h"
@@ -29,14 +30,24 @@ class AllreduceRingChunked : public Algorithm {
         count_(count),
         bytes_(count_ * sizeof(T)),
         fn_(fn) {
+    groupSize_ = contextSize_ / 2;
+    group_ = contextRank_ / groupSize_;
+    groupRank_ = contextRank_ - group_ * groupSize_;
+
+    copyPairRank_ = (contextRank_ + groupSize_) % contextSize_;
+    copyPairFailed_ = false;
+    leftPairRank_ = (groupSize_ + groupRank_ - 1) % groupSize_ + group_ * groupSize_;
+    rightPairRank_ = (groupRank_ + 1) % groupSize_ + group_ * groupSize_;
+    rightPairFailed_ = false;
+
     // Use chunks of no less than 1024 bytes (256 * sizeof(float))
     constexpr unsigned long minSize = 256;
-    chunks_ = this->contextSize_ * 2;
+    chunks_ = this->groupSize_ * 2;
     chunkSize_ = std::max(minSize, (count_ + chunks_ - 1) / chunks_);
     chunkBytes_ = chunkSize_ * sizeof(T);
 
     // Allocate inboxes
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
       inbox_[i] = static_cast<T*>(malloc(bytes_));
     }
 
@@ -44,8 +55,11 @@ class AllreduceRingChunked : public Algorithm {
       return;
     }
 
-    auto& leftPair = this->getLeftPair();
-    auto& rightPair = this->getRightPair();
+    auto& copyPair = this->getPair(copyPairRank_);
+    auto& leftPair = this->getPair(leftPairRank_);
+    auto& rightPair = this->getPair(rightPairRank_);
+
+
     for (int i = 0; i < 2; i++) {
       auto slot = this->context_->nextSlot();
 
@@ -57,19 +71,34 @@ class AllreduceRingChunked : public Algorithm {
         leftPair->createRecvBuffer(slot, inbox_[i], chunkBytes_);
     }
 
+    // copy buffer
+    auto slot = this->context_->nextSlot();
+    sendDataBuf_[2] =
+        copyPair->createSendBuffer(slot, ptrs_[0], bytes_);
+    recvDataBuf_[2] =
+        copyPair->createRecvBuffer(slot, inbox_[2], bytes_);
+
     // Dummy buffers for localized barrier.
     // Before sending to the right, we only need to know that the node
     // on the right is done using the inbox that's about to be written
     // into. No need for a global barrier.
     auto notificationSlot = this->context_->nextSlot();
     sendNotificationBuf_ =
-      leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+        leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
     recvNotificationBuf_ =
-      rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+        rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+    // copy notification
+    auto copyNotificationSlot = this->context_->nextSlot();
+    copySendNotificationBuf_ =
+        copyPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+    copyRecvNotificationBuf_ =
+        copyPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
   }
 
   virtual ~AllreduceRingChunked() {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
       if (inbox_[i] != nullptr) {
         free(inbox_[i]);
       }
@@ -90,12 +119,31 @@ class AllreduceRingChunked : public Algorithm {
       return;
     }
 
+    std::cout << "---- Starting initial pair copying ----" << std::endl;
+    if (!copyPairFailed_) {
+      sendDataBuf_[2]->trySend();
+      recvDataBuf_[2]->tryWaitRecv();
+      fn_->call(ptrs_[0], inbox_[2], count_);
+
+      copyHeartbeat(-1);
+    }
+
+
+    std::cout << "---- Starting in-group allreduce phase 1 ----" << std::endl;
+
     // Kick off copying initial chunks
-    copyChunkAtOffset(2 * this->contextRank_);
-    copyChunkAtOffset(2 * this->contextRank_ + 1);
+    copyChunkAtOffset(2 * this->groupRank_);
+    copyChunkAtOffset(2 * this->groupRank_ + 1);
+
+    if (copyPairFailed_) {
+      copyChunkAtOffset2(2 * this->groupRank_);
+      copyChunkAtOffset2(2 * this->groupRank_ + 1);
+    }
 
     // Start with reduction of previously copied chunk
     for (int round = 2; round < chunks_; round++) {
+      std::cout << "-- Starting phase 1 round " << round << " --" << std::endl;
+
       // We loop over all chunks starting at 2, since we just sent two
       // chunks to fill both buffers. Imagine a square grid with
       // chunks of memory laid out vertically and nodes horizontally.
@@ -114,7 +162,7 @@ class AllreduceRingChunked : public Algorithm {
       // of chunks. The number of chunks is finally added to make sure
       // we can wrap correctly (no modulo against negative number).
       //
-      auto chunkOffset = ((2 * this->contextRank_) - (round & ~0x1) +
+      auto chunkOffset = ((2 * this->groupRank_) - (round & ~0x1) +
                           (round & 0x1) + chunks_) %
           chunks_;
       auto offset = chunkOffset * chunkSize_;
@@ -129,31 +177,66 @@ class AllreduceRingChunked : public Algorithm {
         length = 0;
       }
 
+      std::cout << "Receiving data from " << leftPairRank_ << std::endl;
+      sleep(4);
       // Wait for inbox write to complete
-      recvDataBuf_[chunkOffset & 1]->waitRecv();
+//      recvDataBuf_[chunkOffset & 1]->waitRecv();
+      recvData(chunkOffset & 1);
 
       // Reduce
       if (length > 0) {
         fn_->call(&ptrs_[0][offset], inbox_[chunkOffset & 1], length);
       }
 
+      std::cout << "Sending notification to " << leftPairRank_ << std::endl;
       // Send notification to node on the left that
       // this node is ready for an inbox write.
-      sendNotificationBuf_->send();
+//      sendNotificationBuf_->send();
+      sendNotification();
 
+      if (!copyPairFailed_) {
+        copyHeartbeat(chunkOffset);
+      }
+
+
+      std::cout << "Waiting notification from " << rightPairRank_ << std::endl;
+      sleep(4);
       // Wait for notification from node on the right
       // to be sure this node can start an inbox write.
-      recvNotificationBuf_->waitRecv();
+//      recvNotificationBuf_->waitRecv();
+      if (!rightPairFailed_) {
+        recvNotificationBuf_->tryWaitRecv();
+      }
+
+      if (copyPairFailed_) {
+        recvNotificationBuf2_->tryWaitRecv();
+      }
+
+      if (!copyPairFailed_) {
+        copyHeartbeat(chunkOffset);
+      }
+
 
       // Copy accumulated chunk
       copyChunkAtOffset(chunkOffset);
+
+      if (copyPairFailed_) {
+        copyChunkAtOffset2(chunkOffset);
+      }
+
+
+//      copySendNotificationBuf_->send();
+//      copyRecvNotificationBuf_->waitRecv();
     }
+
+
+    std::cout << "---- Starting in-group allreduce phase 2 ----" << std::endl;
 
     // Second pass around the ring to broadcast result.
     // End at chunks_-2 since that's where the accumulation
     // stopped in the previous set of rounds.
     for (int round = 0; round < (chunks_ - 2); round++) {
-      auto chunkOffset = ((2 * this->contextRank_) - (round & ~0x1) +
+      auto chunkOffset = ((2 * this->groupRank_) - (round & ~0x1) +
                           (round & 0x1) + chunks_) %
           chunks_;
       auto offset = chunkOffset * chunkSize_;
@@ -169,7 +252,7 @@ class AllreduceRingChunked : public Algorithm {
       }
 
       // Wait for inbox write to complete
-      recvDataBuf_[chunkOffset & 1]->waitRecv();
+      recvDataBuf_[chunkOffset & 1]->tryWaitRecv();
 
       // Copy
       if (length > 0) {
@@ -180,22 +263,35 @@ class AllreduceRingChunked : public Algorithm {
       if (round < (chunks_ - 4)) {
         // Send notification to node on the left that
         // this node is ready for an inbox write.
-        sendNotificationBuf_->send();
+        sendNotificationBuf_->trySend();
 
         // Wait for notification from node on the right
         // to be sure this node can start an inbox write.
-        recvNotificationBuf_->waitRecv();
+        if (!rightPairFailed_) {
+          recvNotificationBuf_->tryWaitRecv();
+        }
+        if (copyPairFailed_) {
+          recvNotificationBuf2_->tryWaitRecv();
+        }
 
         // Copy accumulated chunks
         copyChunkAtOffset(chunkOffset);
+        if (copyPairFailed_) {
+          copyChunkAtOffset2(chunkOffset);
+        }
       }
     }
 
     // Final barrier to make sure every node has finished
     // Otherwise, a second all reduce call might interfere
     // with one that it still in progress on some nodes.
-    sendNotificationBuf_->send();
-    recvNotificationBuf_->waitRecv();
+    sendNotificationBuf_->trySend();
+    if (!rightPairFailed_) {
+      recvNotificationBuf_->tryWaitRecv();
+    }
+    if (copyPairFailed_) {
+      recvNotificationBuf2_->tryWaitRecv();
+    }
 
     // Broadcast ptrs_[0]
     for (int i = 1; i < ptrs_.size(); i++) {
@@ -204,7 +300,106 @@ class AllreduceRingChunked : public Algorithm {
   }
 
  protected:
+
+  void sendData(int chunkOffset, size_t offset, size_t length) {
+    auto success = sendDataBuf_[chunkOffset & 0x1]->trySend(offset, length);
+    if (!success) {
+      std::cout << "sending data to " << rightPairRank_ <<  " failed" << std::endl;
+      rightPairRank_ = (rightPairRank_ + groupSize_) % contextSize_;
+
+      auto& rightPair = this->getPair(rightPairRank_);
+
+      for (int i = 0; i < 2; i++) {
+        auto slot = this->context_->nextSlot();
+        sendDataBuf_[i] =
+            rightPair->createSendBuffer(slot, ptrs_[0], bytes_);
+      }
+      auto notificationSlot = this->context_->nextSlot();
+      recvNotificationBuf_ =
+          rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      copyChunkAtOffset((chunkOffset + chunks_ - 1) % chunks_);
+      copyChunkAtOffset(chunkOffset);
+    }
+  }
+
+  void sendNotification() {
+    auto success = sendNotificationBuf_->trySend();
+    if (!success) {
+      std::cout << "sending notification to " << leftPairRank_ <<  " failed" << std::endl;
+      leftPairRank_ = (leftPairRank_ + groupSize_) % contextSize_;
+
+      auto& leftPair = this->getPair(leftPairRank_);
+      for (int i = 0; i < 2; i++) {
+        free(inbox_[i]);
+        inbox_[i] = static_cast<T*>(malloc(bytes_));
+        auto slot = this->context_->nextSlot();
+        recvDataBuf_[i] =
+            leftPair->createRecvBuffer(slot, inbox_[i], chunkBytes_);
+      }
+      auto notificationSlot = this->context_->nextSlot();
+      sendNotificationBuf_ =
+          leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      sendNotification();
+    }
+  }
+
+  void recvData(int bufIdx) {
+    auto success = recvDataBuf_[bufIdx]->tryWaitRecv();
+
+    if (!success) {
+      std::cout << "recving data from " << leftPairRank_ <<  " failed" << std::endl;
+      leftPairRank_ = (leftPairRank_ + groupSize_) % contextSize_;
+
+      auto& leftPair = this->getPair(leftPairRank_);
+      for (int i = 0; i < 2; i++) {
+        auto slot = this->context_->nextSlot();
+        free(inbox_[i]);
+        inbox_[i] = static_cast<T*>(malloc(bytes_));
+        recvDataBuf_[i] =
+            leftPair->createRecvBuffer(slot, inbox_[i], chunkBytes_);
+      }
+      auto notificationSlot = this->context_->nextSlot();
+      sendNotificationBuf_ =
+          leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      recvData(bufIdx);
+    }
+  }
+
+  void copyHeartbeat(int chunkOffset) {
+    auto success = copySendNotificationBuf_->trySend() && copyRecvNotificationBuf_->tryWaitRecv();
+    if (!success) {
+      std::cout << "copy pair " << copyPairRank_ <<  " failed" << std::endl;
+      copyPairFailed_ = true;
+      int initialRightPairRank = (groupRank_ + 1) % groupSize_ + group_ * groupSize_;
+      copyRightPairRank_ = (initialRightPairRank + groupSize_) % contextSize_;
+
+      auto& copyRightPair = this->getPair(copyRightPairRank_);
+
+      for (int i = 0; i < 2; i++) {
+        auto slot = this->context_->nextSlot();
+        sendDataBuf2_[i] =
+            copyRightPair->createSendBuffer(slot, ptrs_[0], bytes_);
+      }
+      auto notificationSlot = this->context_->nextSlot();
+      recvNotificationBuf2_ =
+          copyRightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      if (chunkOffset >= 0) {
+        copyChunkAtOffset2((chunkOffset + chunks_ - 2) % chunks_);
+        copyChunkAtOffset2((chunkOffset + chunks_ - 1) % chunks_);
+      }
+    }
+  }
+
+
+
   void copyChunkAtOffset(int chunkOffset) {
+    if (rightPairFailed_) {
+      return;
+    }
     // Populate inbox of next participant in the ring.
     auto offset = (chunkOffset % chunks_) * chunkSize_;
     auto length = chunkSize_;
@@ -223,8 +418,40 @@ class AllreduceRingChunked : public Algorithm {
     }
 
     // Initiate write to inbox of node on the right.
-    sendDataBuf_[chunkOffset & 0x1]->send(
+    bool success = sendDataBuf_[chunkOffset & 0x1]->trySend(
         offset * sizeof(T), length * sizeof(T));
+    if (success) {
+      std::cout << "sent data to " << rightPairRank_ << std::endl;
+    } else {
+      rightPairFailed_ = true;
+    }
+
+  }
+
+  void copyChunkAtOffset2(int chunkOffset) {
+    // Populate inbox of next participant in the ring.
+    auto offset = (chunkOffset % chunks_) * chunkSize_;
+    auto length = chunkSize_;
+    if (offset + length <= count_) {
+      // Chunk completely in range, copy full chunk.
+    } else if (offset < count_) {
+      // Chunk partially in range, copy partial chunk.
+      length = count_ - offset;
+    } else {
+      // Chunk out of range, copy _something_.
+      // When nothing is put on the wire for empty chunks. @pietern
+      // has seen this algorithm hang. This is probably related to the
+      // chunk iteration order described in the run function.
+      offset = 0;
+      length = 1;
+    }
+
+    // Initiate write to inbox of node on the right.
+    bool success = sendDataBuf2_[chunkOffset & 0x1]->trySend(
+        offset * sizeof(T), length * sizeof(T));
+    if (success) {
+      std::cout << "sent extra data to " << copyRightPairRank_ << std::endl;
+    }
   }
 
   std::vector<T*> ptrs_;
@@ -236,13 +463,30 @@ class AllreduceRingChunked : public Algorithm {
   size_t chunkSize_;
   size_t chunkBytes_;
 
-  T* inbox_[2];
-  std::unique_ptr<transport::Buffer> sendDataBuf_[2];
-  std::unique_ptr<transport::Buffer> recvDataBuf_[2];
+  int leftPairRank_;
+  int rightPairRank_;
+  int copyPairRank_;
+  int groupRank_;
+  int groupSize_;
+  int group_;
+
+  bool copyPairFailed_;
+  int copyRightPairRank_;
+  bool rightPairFailed_;
+
+  T* inbox_[3];
+  std::unique_ptr<transport::Buffer> sendDataBuf_[3];
+  std::unique_ptr<transport::Buffer> recvDataBuf_[3];
+
+  std::unique_ptr<transport::Buffer> sendDataBuf2_[2];
+  std::unique_ptr<transport::Buffer> recvNotificationBuf2_;
 
   int dummy_;
   std::unique_ptr<transport::Buffer> sendNotificationBuf_;
   std::unique_ptr<transport::Buffer> recvNotificationBuf_;
+
+  std::unique_ptr<transport::Buffer> copySendNotificationBuf_;
+  std::unique_ptr<transport::Buffer> copyRecvNotificationBuf_;
 };
 
 } // namespace gloo

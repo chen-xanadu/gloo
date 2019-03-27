@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <string.h>
 
+
 #include "gloo/algorithm.h"
 #include "gloo/context.h"
 
@@ -35,6 +36,9 @@ class AllreduceRing : public Algorithm {
     if (this->contextSize_ == 1) {
       return;
     }
+
+    leftPairRank_ = (context_->size + context_->rank - 1) % context_->size;
+    rightPairRank_ = (context_->rank + 1) % context_->size;
 
     auto& leftPair = this->getLeftPair();
     auto& rightPair = this->getRightPair();
@@ -78,16 +82,18 @@ class AllreduceRing : public Algorithm {
     int numRounds = this->contextSize_ - 1;
     for (int round = 0; round < numRounds; round++) {
       // Initiate write to inbox of node on the right
-      sendDataBuf_->send();
+//      sendDataBuf_->send();
+      sendData();
 
       // Wait for inbox write from node on the left
-      recvDataBuf_->waitRecv();
+//      recvDataBuf_->waitRecv();
+      recvData();
 
       // Reduce
       fn_->call(ptrs_[0], inbox_, count_);
 
       // Wait for outbox write to complete
-      sendDataBuf_->waitSend();
+//      sendDataBuf_->waitSend();
 
       // Prepare for next round if necessary
       if (round < (numRounds - 1)) {
@@ -96,10 +102,12 @@ class AllreduceRing : public Algorithm {
 
       // Send notification to node on the left that
       // this node is ready for an inbox write.
-      sendNotificationBuf_->send();
+//      sendNotificationBuf_->send();
+      sendNotification();
 
       // Wait for notification from node on the right
-      recvNotificationBuf_->waitRecv();
+//      recvNotificationBuf_->waitRecv();
+      recvNotification();
     }
 
     // Broadcast ptrs_[0]
@@ -108,11 +116,83 @@ class AllreduceRing : public Algorithm {
     }
   }
 
+  void sendData() {
+    auto success = sendDataBuf_->trySend();
+    if (!success) {
+      std::cout << "sending data to " << rightPairRank_ <<  " failed" << std::endl;
+      rightPairRank_ = (rightPairRank_ + 1) % context_->size;
+
+      auto& rightPair = this->getPair(rightPairRank_);
+      auto slot = this->context_->nextSlot();
+      sendDataBuf_ = rightPair->createSendBuffer(slot, outbox_, bytes_);
+      auto notificationSlot = this->context_->nextSlot();
+      recvNotificationBuf_ =
+          rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      sendData();
+    }
+  }
+
+  void sendNotification() {
+    auto success = sendNotificationBuf_->trySend();
+    if (!success) {
+      std::cout << "sending notification to " << leftPairRank_ <<  " failed" << std::endl;
+      leftPairRank_ = (context_->size + leftPairRank_ - 1) % context_->size;
+
+      auto& leftPair = this->getPair(leftPairRank_);
+      auto slot = this->context_->nextSlot();
+      recvDataBuf_ = leftPair->createRecvBuffer(slot, inbox_, bytes_);
+      auto notificationSlot = this->context_->nextSlot();
+      sendNotificationBuf_ =
+          leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      sendNotification();
+    }
+  }
+
+  void recvData() {
+    auto success = recvDataBuf_->tryWaitRecv();
+
+    if (!success) {
+      std::cout << "recving data from " << leftPairRank_ <<  " failed" << std::endl;
+      leftPairRank_ = (context_->size + leftPairRank_ - 1) % context_->size;
+
+      auto& leftPair = this->getPair(leftPairRank_);
+      auto slot = this->context_->nextSlot();
+      recvDataBuf_ = leftPair->createRecvBuffer(slot, inbox_, bytes_);
+      auto notificationSlot = this->context_->nextSlot();
+      sendNotificationBuf_ =
+          leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      recvData();
+    }
+  }
+
+  void recvNotification() {
+    auto success = recvNotificationBuf_->tryWaitRecv();
+    if (!success) {
+      std::cout << "recving notification from " << rightPairRank_ <<  " failed" << std::endl;
+      rightPairRank_ = (rightPairRank_ + 1) % context_->size;
+
+      auto& rightPair = this->getPair(rightPairRank_);
+      auto slot = this->context_->nextSlot();
+      sendDataBuf_ = rightPair->createSendBuffer(slot, outbox_, bytes_);
+      auto notificationSlot = this->context_->nextSlot();
+      recvNotificationBuf_ =
+          rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
+
+      recvNotification();
+    }
+  }
+
  protected:
   std::vector<T*> ptrs_;
   const int count_;
   const int bytes_;
   const ReductionFunction<T>* fn_;
+
+  int leftPairRank_;
+  int rightPairRank_;
 
   T* inbox_;
   T* outbox_;

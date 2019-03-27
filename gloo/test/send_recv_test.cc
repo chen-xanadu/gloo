@@ -9,7 +9,6 @@
 #include "gloo/test/base_test.h"
 
 #include <unordered_set>
-#include <array>
 
 #include "gloo/transport/tcp/unbound_buffer.h"
 

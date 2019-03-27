@@ -11,7 +11,6 @@
 #include <fcntl.h>
 #include <ftw.h>
 
-#include <array>
 #include <string>
 #include <sstream>
 #include <vector>

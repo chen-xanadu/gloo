@@ -31,6 +31,8 @@ class Buffer : public ::gloo::transport::Buffer {
 
   virtual void waitRecv() override;
   virtual void waitSend() override;
+  virtual bool tryWaitRecv() override;
+  virtual bool trySend(size_t offset, size_t length, size_t roffset = 0) override;
 
  protected:
   // May only be constructed from helper function in pair.cc

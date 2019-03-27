@@ -1,7 +1,10 @@
 #include <iostream>
 #include <memory>
+#include <array>
+#include <unistd.h>
 
 #include "gloo/allreduce_ring.h"
+#include "gloo/allreduce_ring_chunked.h"
 #include "gloo/rendezvous/context.h"
 #include "gloo/rendezvous/file_store.h"
 #include "gloo/rendezvous/prefix_store.h"
@@ -104,7 +107,7 @@ int main(void) {
   std::array<int, 4> data;
   std::cout << "Input: " << std::endl;
   for (int i = 0; i < data.size(); i++) {
-    data[i] = i;
+    data[i] = rank + 1 + i;
     std::cout << "data[" << i << "] = " << data[i] << std::endl;
   }
 
@@ -120,17 +123,30 @@ int main(void) {
 
   // Instantiate the collective algorithm.
   auto allreduce =
-    std::make_shared<gloo::AllreduceRing<int>>(
+    std::make_shared<gloo::AllreduceRingChunked<int>>(
       context, ptrs, count);
 
-  // Run the algorithm.
-  allreduce->run();
+  while (true) {
+    for (int i = 0; i < data.size(); i++) {
+      data[i] = rank + 1 + i;
+    }
+    // Run the algorithm.
+    allreduce->run();
 
-  // Print the result.
-  std::cout << "Output: " << std::endl;
-  for (int i = 0; i < data.size(); i++) {
-    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+    // Print the result.
+    std::cout << "Output: " << std::endl;
+    for (int i = 0; i < data.size(); i++) {
+      std::cout << "data[" << i << "] = " << data[i] << std::endl;
+    }
+    std::cout << "---- Allreduce Finished ----" << std::endl;
+    sleep(2);
   }
+
+  for (int i = 0; i < size; i++) {
+    if (i == rank) continue;
+    std::cout << context->getPair(i)->address().str()  << std::endl;
+  }
+  std::cout << context->getDevice()->str() << std::endl;
 
   return 0;
 }

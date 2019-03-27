@@ -247,7 +247,7 @@ class Pair : public ::gloo::transport::Pair {
       NonOwningPtr<UnboundBuffer>& buf,
       struct iovec& iov);
 
-  // Read operation from socket into member variable (see `rx_`).
+  // Read operation from socket into argument.
   //
   // The pair mutex is expected to be held when called.
   //

@@ -17,6 +17,8 @@
 
 #include "gloo/common/error.h"
 #include "gloo/common/logging.h"
+#include "buffer.h"
+
 
 namespace gloo {
 namespace transport {
@@ -76,6 +78,18 @@ void Buffer::waitRecv() {
     recvCompletions_--;
   }
 }
+
+bool Buffer::tryWaitRecv() {
+  try {
+    waitRecv();
+  } catch (...) {
+    std::cout << "recv exception caught" << std::endl;
+    ex_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
 
 void Buffer::handleSendCompletion() {
   std::lock_guard<std::mutex> lock(m_);
@@ -147,6 +161,17 @@ void Buffer::send(size_t offset, size_t length, size_t roffset) {
 
   // Pass to pair
   pair_->send(op);
+}
+
+bool Buffer::trySend(size_t offset, size_t length, size_t roffset) {
+  try {
+    send(offset, length, roffset);
+  } catch (...) {
+    std::cout << "send exception caught" << std::endl;
+    ex_ = nullptr;
+    return false;
+  }
+  return true;
 }
 
 void Buffer::signalException(std::exception_ptr ex) {

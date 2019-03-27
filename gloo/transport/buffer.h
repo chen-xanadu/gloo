@@ -32,6 +32,12 @@ class Buffer {
 
   virtual void waitRecv() = 0;
   virtual void waitSend() = 0;
+  virtual bool tryWaitRecv() = 0;
+  virtual bool trySend(size_t offset, size_t length, size_t roffset = 0) = 0;
+
+  bool trySend() {
+    return trySend(0, size_);
+  }
 
  protected:
   int slot_;

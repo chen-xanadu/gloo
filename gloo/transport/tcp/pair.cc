@@ -8,7 +8,6 @@
 
 #include "gloo/transport/tcp/pair.h"
 
-#include <array>
 #include <algorithm>
 #include <sstream>
 
@@ -24,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <iostream>
 
 #include "gloo/common/error.h"
 #include "gloo/common/logging.h"
@@ -201,6 +201,7 @@ void Pair::connect(const Address& peer) {
   throwIfException();
 
   peer_ = peer;
+  std::cout << self_.str() << " <-> " << peer_.str() << std::endl;
 
   // Addresses have to have same family
   if (self_.ss_.ss_family != peer_.ss_.ss_family) {
@@ -501,13 +502,14 @@ ssize_t Pair::prepareRead(
 bool Pair::read() {
   NonOwningPtr<UnboundBuffer> buf;
   auto start = std::chrono::steady_clock::now();
+  auto& op = rx_;
 
   for (;;) {
     struct iovec iov = {
         .iov_base = nullptr,
         .iov_len = 0,
     };
-    const auto nbytes = prepareRead(rx_, buf, iov);
+    const auto nbytes = prepareRead(op, buf, iov);
     if (nbytes < 0) {
       return false;
     }
@@ -573,15 +575,15 @@ bool Pair::read() {
       return false;
     }
 
-    rx_.nread += rv;
+    op.nread += rv;
   }
 
   // Read completed
-  const auto opcode = rx_.getOpcode();
+  const auto opcode = op.getOpcode();
   switch (opcode) {
     case Op::SEND_BUFFER:
       // Done sending data to pinned buffer; trigger completion.
-      rx_.buf->handleRecvCompletion();
+      op.buf->handleRecvCompletion();
       break;
     case Op::SEND_UNBOUND_BUFFER:
       // Remote side is sending data to unbound buffer; trigger completion
@@ -589,15 +591,14 @@ bool Pair::read() {
       break;
     case Op::NOTIFY_SEND_READY:
       // Remote side has pending send operation
-      handleRemotePendingSend(rx_);
+      handleRemotePendingSend(op);
       break;
     case Op::NOTIFY_RECV_READY:
       // Remote side has pending recv operation
-      handleRemotePendingRecv(rx_);
+      handleRemotePendingRecv(op);
       break;
   }
 
-  // Reset read operation state.
   rx_ = Op();
   return true;
 }
@@ -1190,7 +1191,7 @@ void Pair::signalException(std::exception_ptr ex) {
   }
 
   // Store exception_ptr and signal any threads in the async path.
-  ex_ = ex;
+//  ex_ = ex;
   cv_.notify_all();
 
   // Move to closed state.

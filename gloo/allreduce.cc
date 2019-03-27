@@ -8,7 +8,6 @@
 
 #include "gloo/allreduce.h"
 
-#include <array>
 #include <algorithm>
 #include <cstring>
 

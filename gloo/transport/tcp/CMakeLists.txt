@@ -1,6 +1,6 @@
-if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    message(WARNING "Gloo doesn't support OSX (uses epoll)")
-else()
+#if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+#    message(WARNING "Gloo doesn't support OSX (uses epoll)")
+#else()
     list(APPEND GLOO_TRANSPORT_SRCS
       "${CMAKE_CURRENT_SOURCE_DIR}/address.cc"
       "${CMAKE_CURRENT_SOURCE_DIR}/buffer.cc"
@@ -17,7 +17,7 @@ else()
       "${CMAKE_CURRENT_SOURCE_DIR}/pair.h"
       "${CMAKE_CURRENT_SOURCE_DIR}/unbound_buffer.h"
       )
-endif()
+#endif()
 
 set(GLOO_TRANSPORT_SRCS ${GLOO_TRANSPORT_SRCS} PARENT_SCOPE)
 set(GLOO_TRANSPORT_HDRS ${GLOO_TRANSPORT_HDRS} PARENT_SCOPE)
