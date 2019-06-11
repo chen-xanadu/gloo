@@ -32,6 +32,7 @@ class AllreduceRing : public Algorithm {
         fn_(fn) {
     inbox_ = static_cast<T*>(malloc(bytes_));
     outbox_ = static_cast<T*>(malloc(bytes_));
+    oldbox_ = static_cast<T*>(malloc(bytes_));
 
     if (this->contextSize_ == 1) {
       return;
@@ -97,6 +98,7 @@ class AllreduceRing : public Algorithm {
 
       // Prepare for next round if necessary
       if (round < (numRounds - 1)) {
+        memcpy(oldbox_, outbox_, bytes_);
         memcpy(outbox_, inbox_, bytes_);
       }
 
@@ -108,7 +110,10 @@ class AllreduceRing : public Algorithm {
       // Wait for notification from node on the right
 //      recvNotificationBuf_->waitRecv();
       recvNotification();
+
     }
+    sendNotificationBuf_->send();
+    recvNotificationBuf_->waitRecv();
 
     // Broadcast ptrs_[0]
     for (int i = 1; i < ptrs_.size(); i++) {
@@ -146,6 +151,7 @@ class AllreduceRing : public Algorithm {
       sendNotificationBuf_ =
           leftPair->createSendBuffer(notificationSlot, &dummy_, sizeof(dummy_));
 
+      recvData();
       sendNotification();
     }
   }
@@ -181,6 +187,7 @@ class AllreduceRing : public Algorithm {
       recvNotificationBuf_ =
           rightPair->createRecvBuffer(notificationSlot, &dummy_, sizeof(dummy_));
 
+      sendData();
       recvNotification();
     }
   }
@@ -196,6 +203,7 @@ class AllreduceRing : public Algorithm {
 
   T* inbox_;
   T* outbox_;
+  T* oldbox_;
   std::unique_ptr<transport::Buffer> sendDataBuf_;
   std::unique_ptr<transport::Buffer> recvDataBuf_;
 

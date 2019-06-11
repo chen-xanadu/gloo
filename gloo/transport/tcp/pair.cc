@@ -201,7 +201,7 @@ void Pair::connect(const Address& peer) {
   throwIfException();
 
   peer_ = peer;
-  std::cout << self_.str() << " <-> " << peer_.str() << std::endl;
+//  std::cout << self_.str() << " <-> " << peer_.str() << std::endl;
 
   // Addresses have to have same family
   if (self_.ss_.ss_family != peer_.ss_.ss_family) {

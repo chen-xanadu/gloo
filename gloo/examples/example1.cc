@@ -1,13 +1,15 @@
 #include <iostream>
 #include <memory>
 #include <array>
-#include <unistd.h>
+#include <chrono>
+#include <numeric>
 
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
 #include "gloo/rendezvous/context.h"
 #include "gloo/rendezvous/file_store.h"
 #include "gloo/rendezvous/prefix_store.h"
+#include "gloo/algorithm.h"
 #include "gloo/transport/tcp/device.h"
 
 // Usage:
@@ -52,8 +54,8 @@ int main(void) {
   gloo::transport::tcp::attr attr;
   //attr.iface = "eth0";
   //attr.iface = "ib0";
-  attr.iface = "lo";
-
+//  attr.iface = "lo";
+  attr.iface = "ens4";
   // attr.ai_family = AF_INET; // Force IPv4
   // attr.ai_family = AF_INET6; // Force IPv6
   attr.ai_family = AF_UNSPEC; // Use either (default)
@@ -84,6 +86,7 @@ int main(void) {
   // this example uses multiple processes on a single machine.
   //
   auto fileStore = gloo::rendezvous::FileStore("/tmp");
+//  auto redisStore = gloo::rendezvous::RedisStore("10.128.0.2");
 
   // To be able to reuse the same store over and over again and not have
   // interference between runs, we scope it to a unique prefix with the
@@ -99,16 +102,19 @@ int main(void) {
   // and setup of send/receive buffer pairs.
   const int rank = atoi(getenv("RANK"));
   const int size = atoi(getenv("SIZE"));
+  const int group = atoi(getenv("GROUP"));
   auto context = std::make_shared<gloo::rendezvous::Context>(rank, size);
+  context->setTimeout(std::chrono::seconds(30));
   context->connectFullMesh(prefixStore, dev);
 
   // All connections are now established. We can now initialize some
   // test data, instantiate the collective algorithm, and run it.
-  std::array<int, 4> data;
-  std::cout << "Input: " << std::endl;
+  std::vector<int> data(9);
+//  std::cout << "Input: " << std::endl;
   for (int i = 0; i < data.size(); i++) {
-    data[i] = rank + 1 + i;
-    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+    data[i] = rand();
+//    data[i] = rank + 1 + i;
+//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
   }
 
   // Allreduce operates on memory that is already managed elsewhere.
@@ -124,29 +130,34 @@ int main(void) {
   // Instantiate the collective algorithm.
   auto allreduce =
     std::make_shared<gloo::AllreduceRingChunked<int>>(
-      context, ptrs, count);
+      context, ptrs, count, gloo::ReductionFunction<int>::sum, group);
 
-  while (true) {
+  std::vector<long long int> t;
+  for (int r = 0; r < 10; r++) {
     for (int i = 0; i < data.size(); i++) {
-      data[i] = rank + 1 + i;
+      data[i] = rand();
+//      data[i] = rank + 1 + i;
     }
+    auto start = std::chrono::high_resolution_clock::now();
     // Run the algorithm.
     allreduce->run();
-
-    // Print the result.
-    std::cout << "Output: " << std::endl;
-    for (int i = 0; i < data.size(); i++) {
-      std::cout << "data[" << i << "] = " << data[i] << std::endl;
-    }
-    std::cout << "---- Allreduce Finished ----" << std::endl;
-    sleep(2);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    t.push_back(d);
+    std::cout << "Round time (ms): " << d << std::endl;
   }
 
-  for (int i = 0; i < size; i++) {
-    if (i == rank) continue;
-    std::cout << context->getPair(i)->address().str()  << std::endl;
-  }
-  std::cout << context->getDevice()->str() << std::endl;
+  // Print the result.
+//  std::cout << "Output: " << std::endl;
+//  for (int i = 0; i < data.size(); i++) {
+//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+//  }
+
+  std::cout << "---- Allreduce Finished ----" << std::endl;
+
+
+  float average = (float) std::accumulate(t.begin(), t.end(), 0.0) / t.size();
+  std::cout << "Average time (ms): " << average << std::endl;
 
   return 0;
 }

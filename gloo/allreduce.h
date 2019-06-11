@@ -13,7 +13,10 @@
 #include <vector>
 
 #include "gloo/context.h"
+#include "gloo/algorithm.h"
 #include "gloo/transport/unbound_buffer.h"
+#include "gloo/allreduce_ring.h"
+#include "gloo/allreduce_ring_chunked.h"
 
 namespace gloo {
 
@@ -80,6 +83,10 @@ class AllreduceOptions {
 
   template <typename T>
   void setOutputs(std::vector<T*> ptrs, size_t elements) {
+    if (algo == nullptr) {
+      algo = std::make_shared<AllreduceRing<T> >(
+          context, ptrs, elements);
+    }
     setOutputs(ptrs.data(), ptrs.size(), elements);
   }
 
@@ -141,6 +148,8 @@ class AllreduceOptions {
 
   // End-to-end timeout for this operation.
   std::chrono::milliseconds timeout;
+
+  std::shared_ptr<Algorithm> algo = nullptr;
 
   friend void allreduce(AllreduceOptions&);
 };

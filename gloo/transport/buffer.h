@@ -39,6 +39,10 @@ class Buffer {
     return trySend(0, size_);
   }
 
+  int getSlot() {
+    return slot_;
+  }
+
  protected:
   int slot_;
   void* ptr_;

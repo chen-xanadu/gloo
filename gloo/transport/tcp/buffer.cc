@@ -83,7 +83,7 @@ bool Buffer::tryWaitRecv() {
   try {
     waitRecv();
   } catch (...) {
-    std::cout << "recv exception caught" << std::endl;
+    std::cout << "recv exception caught: " << this->pair_->address().str() << std::endl;
     ex_ = nullptr;
     return false;
   }
@@ -167,7 +167,7 @@ bool Buffer::trySend(size_t offset, size_t length, size_t roffset) {
   try {
     send(offset, length, roffset);
   } catch (...) {
-    std::cout << "send exception caught" << std::endl;
+    std::cout << "send exception caught: " << this->pair_->address().str() << std::endl;
     ex_ = nullptr;
     return false;
   }
