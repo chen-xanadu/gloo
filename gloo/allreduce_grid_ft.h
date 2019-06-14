@@ -142,6 +142,10 @@ class AllreduceGridFT : public Algorithm {
   }
 
   void run() {
+    run(false);
+  }
+
+  void run(bool insertFailure = false) {
     // Reduce specified pointers into ptrs_[0]
     for (int i = 1; i < ptrs_.size(); i++) {
       fn_->call(ptrs_[0], ptrs_[i], count_);
@@ -155,9 +159,11 @@ class AllreduceGridFT : public Algorithm {
       return;
     }
 
-    bool success;
-
     crossGroupReduceScatter();
+
+    if (insertFailure) {
+      exit(0);
+    }
 
     inGroupAllReduceP1();
 
@@ -194,12 +200,6 @@ class AllreduceGridFT : public Algorithm {
       if (!success) repairGroupId_ = (groupId_ + 1 + i) % groups_;
     }
 
-    for (int i = groups_ - 2; i >= 0; i--) {
-      if (repairGroupId_ == (groupId_ + groups_ - 1 - i) % groups_) continue;
-      success = recvCopyDataBuf_[i]->tryWaitRecv();
-      if (!success) repairGroupId_ = (groupId_ + groups_ - 1 - i) % groups_;
-    }
-
     if ((groupId_ + 1) % groups_ != repairGroupId_) {
       auto offset = reduceOffset_;
       auto length = reduceCount_;
@@ -208,6 +208,12 @@ class AllreduceGridFT : public Algorithm {
       }
       success = sendCopyDataBuf_[groups_ - 1]->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) repairGroupId_ = (groupId_ + 1) % groups_;
+    }
+
+    for (int i = groups_ - 2; i >= 0; i--) {
+      if (repairGroupId_ == (groupId_ + groups_ - 1 - i) % groups_) continue;
+      success = recvCopyDataBuf_[i]->tryWaitRecv();
+      if (!success) repairGroupId_ = (groupId_ + groups_ - 1 - i) % groups_;
     }
 
     if ((groupId_ + groups_ - 1) % groups_ != repairGroupId_) {
@@ -708,13 +714,6 @@ class AllreduceGridFT : public Algorithm {
       }
     }
 
-    for (int i = 0; i < groups_ - 1; i++) {
-      recvBackupBuf[i]->waitRecv();
-    }
-
-    for (int i = 1; i < backupPtrs_.size(); i++) {
-      fn_->call(backupPtrs_[0], backupPtrs_[i], reduceCount_);
-    }
 
     // update left pair rank
     leftPairFailed_ = true;
@@ -745,6 +744,18 @@ class AllreduceGridFT : public Algorithm {
 
     msg_ = lostChunkOffset1_;
     sendNotificationBuf_->send();
+    syncRoundBuf->waitRecv();
+    msg_ = lostChunkOffset2_;
+    sendNotificationBuf_->send();
+
+
+    for (int i = 0; i < groups_ - 1; i++) {
+      recvBackupBuf[i]->waitRecv();
+    }
+
+    for (int i = 1; i < backupPtrs_.size(); i++) {
+      fn_->call(backupPtrs_[0], backupPtrs_[i], reduceCount_);
+    }
 
     int offset, length;
     if (lostChunkOffset1_ >= 0) {
@@ -758,10 +769,7 @@ class AllreduceGridFT : public Algorithm {
         }
       }
     }
-    syncRoundBuf->waitRecv();
 
-    msg_ = lostChunkOffset2_;
-    sendNotificationBuf_->send();
     if (lostChunkOffset2_ >= 0) {
       std::tie(offset, length) = getChunkLoc(lostChunkOffset2_);
       recvDataBuf_[lostChunkOffset2_ & 1]->waitRecv();
@@ -807,15 +815,17 @@ class AllreduceGridFT : public Algorithm {
 
     recvNotificationBuf_->waitRecv();
     auto chunkOffset1 = msg_;
+
+    syncRoundBuffer->send();
+
+    recvNotificationBuf_->waitRecv();
+    auto chunkOffset2 = msg_;
+
     int offset, length;
     if (chunkOffset1 >= 0) {
       std::tie(offset, length) = getChunkLoc(chunkOffset1);
       copyChunkAtOffset(chunkOffset1);
     }
-    syncRoundBuffer->send();
-
-    recvNotificationBuf_->waitRecv();
-    auto chunkOffset2 = msg_;
     if (chunkOffset2 >= 0) {
       std::tie(offset, length) = getChunkLoc(chunkOffset2);
       copyChunkAtOffset(chunkOffset2);
@@ -831,7 +841,14 @@ class AllreduceGridFT : public Algorithm {
 
 
     // resend inflight
-    int lostChunk1 = nextChunkOffset(chunkOffset2);
+    int lostChunk1;
+    if (chunkOffset2 != -1) {
+      lostChunk1 = nextChunkOffset(chunkOffset2);
+    } else if (chunkOffset1 != -1) {
+      lostChunk1 = nextChunkOffset(chunkOffset2);
+    } else {
+      lostChunk1 = groupRank_ * 2;
+    }
     if (lostChunk1 >= 0) {
       std::cout << "[R] resending chunk at " << lostChunk1 << std::endl;
       copyChunkAtOffset(lostChunk1);
@@ -928,12 +945,6 @@ class AllreduceGridFT : public Algorithm {
     }
   }
 
-  void testRepair(int round) {
-    if (round != chunks_) return;
-    if (contextRank_ == 0) {
-      exit(0);
-    }
-  }
 
   void copyChunkAtOffset(int chunkOffset) {
     // Populate inbox of next participant in the ring.
@@ -1002,9 +1013,6 @@ class AllreduceGridFT : public Algorithm {
   int msg_ = -1;
   std::unique_ptr<transport::Buffer> sendNotificationBuf_;
   std::unique_ptr<transport::Buffer> recvNotificationBuf_;
-
-  std::unique_ptr<transport::Buffer> sendNotificationBuf2_;
-  std::unique_ptr<transport::Buffer> recvNotificationBuf2_;
 
   std::vector<int> copyPairs_;
   std::vector<T *> copyInbox_;
