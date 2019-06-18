@@ -1,13 +1,15 @@
 #include <iostream>
 #include <memory>
 #include <array>
-#include <chrono>
-#include <numeric>
+#include <unistd.h>
 
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
+#include "gloo/allreduce_grid.h"
+#include "gloo/allreduce_grid_ft.h"
 #include "gloo/rendezvous/context.h"
 #include "gloo/rendezvous/file_store.h"
+#include "gloo/rendezvous/redis_store.h"
 #include "gloo/rendezvous/prefix_store.h"
 #include "gloo/algorithm.h"
 #include "gloo/transport/tcp/device.h"
@@ -102,19 +104,17 @@ int main(void) {
   // and setup of send/receive buffer pairs.
   const int rank = atoi(getenv("RANK"));
   const int size = atoi(getenv("SIZE"));
-  const int group = atoi(getenv("GROUP"));
   auto context = std::make_shared<gloo::rendezvous::Context>(rank, size);
-  context->setTimeout(std::chrono::seconds(30));
   context->connectFullMesh(prefixStore, dev);
 
   // All connections are now established. We can now initialize some
   // test data, instantiate the collective algorithm, and run it.
-  std::vector<int> data(9);
-//  std::cout << "Input: " << std::endl;
+  std::vector<int> data(18);
+  std::cout << "Input: " << std::endl;
   for (int i = 0; i < data.size(); i++) {
-    data[i] = rand();
-//    data[i] = rank + 1 + i;
-//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+//    data[i] = rand();
+    data[i] = rank + 1 + i;
+    std::cout << "data[" << i << "] = " << data[i] << std::endl;
   }
 
   // Allreduce operates on memory that is already managed elsewhere.
@@ -129,35 +129,29 @@ int main(void) {
 
   // Instantiate the collective algorithm.
   auto allreduce =
-    std::make_shared<gloo::AllreduceRingChunked<int>>(
-      context, ptrs, count, gloo::ReductionFunction<int>::sum, group);
+    std::make_shared<gloo::AllreduceGridFT<int>>(
+      context, ptrs, count, gloo::ReductionFunction<int>::sum, 3);
 
-  std::vector<long long int> t;
-  for (int r = 0; r < 10; r++) {
-    for (int i = 0; i < data.size(); i++) {
-      data[i] = rand();
-//      data[i] = rank + 1 + i;
-    }
-    auto start = std::chrono::high_resolution_clock::now();
-    // Run the algorithm.
-    allreduce->run();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    t.push_back(d);
-    std::cout << "Round time (ms): " << d << std::endl;
+for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < data.size(); i++) {
+    data[i] = rank + 1 + i;
+	std::cout << "data[" << i << "] = " << data[i] << std::endl;
+  }
+  std::cout << "---- Allreduce Start ----" << std::endl;
+  // Run the algorithm.
+  if (i == 1 && rank == 0) {
+    allreduce->run(true);
+  } else {
+    allreduce->run(false);
   }
 
   // Print the result.
-//  std::cout << "Output: " << std::endl;
-//  for (int i = 0; i < data.size(); i++) {
-//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
-//  }
-
+  std::cout << "Output: " << std::endl;
+  for (int i = 0; i < data.size(); i++) {
+    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+  }
   std::cout << "---- Allreduce Finished ----" << std::endl;
-
-
-  float average = (float) std::accumulate(t.begin(), t.end(), 0.0) / t.size();
-  std::cout << "Average time (ms): " << average << std::endl;
+}
 
   return 0;
 }
