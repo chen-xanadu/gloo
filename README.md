@@ -1,4 +1,4 @@
-Original README
+[Link to original README](https://github.com/chen-xanadu/gloo/blob/master/README_GLOO.md)
 
 Added grid-based all-reduce implementation:
 - [Fault-tolerant version](https://github.com/chen-xanadu/gloo/blob/master/gloo/allreduce_grid_ft.h)
