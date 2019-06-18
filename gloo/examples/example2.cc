@@ -1,7 +1,8 @@
 #include <iostream>
 #include <memory>
 #include <array>
-#include <unistd.h>
+#include <chrono>
+#include <numeric>
 
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
@@ -55,9 +56,9 @@ int main(void) {
   gloo::transport::tcp::attr attr;
   //attr.iface = "eth0";
   //attr.iface = "ib0";
-  attr.iface = "lo";
-  // attr.iface = "ens4";
-  // attr.ai_family = AF_INET; // Force IPv4
+//  attr.iface = "lo";
+  attr.iface = "eno1";  
+// attr.ai_family = AF_INET; // Force IPv4
   // attr.ai_family = AF_INET6; // Force IPv6
   attr.ai_family = AF_UNSPEC; // Use either (default)
 
@@ -86,7 +87,7 @@ int main(void) {
   // Below, we instantiate rendezvous using the filesystem, given that
   // this example uses multiple processes on a single machine.
   //
-  auto fileStore = gloo::rendezvous::FileStore("/tmp");
+  auto fileStore = gloo::rendezvous::FileStore("/homes/ychen/tmp");
 //  auto redisStore = gloo::rendezvous::RedisStore("10.128.0.2");
 
   // To be able to reuse the same store over and over again and not have
@@ -103,54 +104,125 @@ int main(void) {
   // and setup of send/receive buffer pairs.
   const int rank = atoi(getenv("RANK"));
   const int size = atoi(getenv("SIZE"));
+  const int group = atoi(getenv("GROUP"));
+  const int elements = atoi(getenv("ELEMENT"));
+  std::cout << "-- Element " << elements << " --" << std::endl;
   auto context = std::make_shared<gloo::rendezvous::Context>(rank, size);
+  context->setTimeout(std::chrono::seconds(30));
   context->connectFullMesh(prefixStore, dev);
 
   // All connections are now established. We can now initialize some
   // test data, instantiate the collective algorithm, and run it.
-  std::vector<int> data(18);
-  std::cout << "Input: " << std::endl;
+  std::vector<float> data(elements);
+//  std::cout << "Input: " << std::endl;
   for (int i = 0; i < data.size(); i++) {
-//    data[i] = rand();
-    data[i] = rank + 1 + i;
-    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+    data[i] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+//    data[i] = rank + 1 + i;
+//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
   }
 
   // Allreduce operates on memory that is already managed elsewhere.
   // Every instance can take multiple pointers and perform reduction
   // across local buffers as well. If you have a single buffer only,
   // you must pass a std::vector with a single pointer.
-  std::vector<int*> ptrs;
+  std::vector<float*> ptrs;
   ptrs.push_back(&data[0]);
 
   // The number of elements at the specified pointer.
   int count = data.size();
 
   // Instantiate the collective algorithm.
-  auto allreduce =
-    std::make_shared<gloo::AllreduceGridFT<int>>(
-      context, ptrs, count, gloo::ReductionFunction<int>::sum, 3);
+  auto allreduce1 =
+    std::make_shared<gloo::AllreduceRingChunked<float>>(
+      context, ptrs, count, gloo::ReductionFunction<float>::sum);
 
-for (int i = 0; i < 2; i++) {
-  for (int i = 0; i < data.size(); i++) {
-    data[i] = rank + 1 + i;
-	std::cout << "data[" << i << "] = " << data[i] << std::endl;
+  std::vector<long long int> t;
+  for (int r = 0; r < 10; r++) {
+    for (int i = 0; i < data.size(); i++) {
+      data[i] = rank + 1;
+    }
+    auto start = std::chrono::system_clock::now();
+    // Run the algorithm.
+    allreduce1->run();
+    auto end = std::chrono::system_clock::now();
+    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    t.push_back(d);
+    std::cout << "Round time (ms): " << d << std::endl;
+
+    bool verified = true;
+    for (int i = 0; i < data.size(); i++) {
+      if (data[i] != (1 + 1 + size - 1) * size / 2) {
+        verified = false;
+      }
+    }
+    if (!verified) {
+      std::cout << "Wrong results!" << std::endl;
+    }
+
   }
-  std::cout << "---- Allreduce Start ----" << std::endl;
-  // Run the algorithm.
-  if (i == 1 && rank == 0) {
-    allreduce->run(true);
-  } else {
-    allreduce->run(false);
-  }
+
+  float average = std::accumulate(++t.begin(), t.end(), 0.0)/(t.size()-1);
+  std::cout << "Ring average time (ms): " << average << std::endl;
+  
+  auto allreduce2 =
+    std::make_shared<gloo::AllreduceGrid<float>>(
+      context, ptrs, count, gloo::ReductionFunction<float>::sum, group);
+
+  t.clear();
+  for (int r = 0; r < 10; r++) {
+    for (int i = 0; i < data.size(); i++) {
+      data[i] = rank + 1;
+    }
+    auto start = std::chrono::system_clock::now();
+    // Run the algorithm.
+    allreduce2->run();
+    auto end = std::chrono::system_clock::now();
+    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    t.push_back(d);
+    std::cout << "Round time (ms): " << d << std::endl;
+    bool verified = true;
+    for (int i = 0; i < data.size(); i++) {
+      if (data[i] != (1 + 1  + size - 1) * size / 2) {
+      	verified = false;
+      }
+    }
+    if (!verified) {
+      std::cout << "Wrong results!" << std::endl;
+    }
+  } 
 
   // Print the result.
-  std::cout << "Output: " << std::endl;
-  for (int i = 0; i < data.size(); i++) {
-    std::cout << "data[" << i << "] = " << data[i] << std::endl;
-  }
-  std::cout << "---- Allreduce Finished ----" << std::endl;
-}
+//  std::cout << "Output: " << std::endl;
+//  for (int i = 0; i < data.size(); i++) {
+//    std::cout << "data[" << i << "] = " << data[i] << std::endl;
+//  }
 
+  average = std::accumulate(++t.begin(), t.end(), 0.0)/(t.size()-1);
+  std::cout << "Grid average time (ms): " << average << std::endl;
+  
+  auto allreduce3 =
+    std::make_shared<gloo::AllreduceGridFT<float>>(
+      context, ptrs, count, gloo::ReductionFunction<float>::sum, group);
+
+  t.clear();
+  for (int r = 0; r < 2; r++) {
+    //for (int i = 0; i < data.size(); i++) {
+    //  data[i] = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+    //}
+    auto start = std::chrono::system_clock::now();
+    // Run the algorithm.
+    if (r == 1 && rank == 0) {
+      allreduce3->run(true);
+    } else {
+      allreduce3->run(false);
+    }
+    auto end = std::chrono::system_clock::now();
+    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    t.push_back(d);
+    std::cout << "Round time (ms): " << d << std::endl;
+
+  }
+  average = std::accumulate(++t.begin(), t.end(), 0.0)/(t.size()-1);
+  std::cout << "Grid with failure average time (ms): " << average << std::endl;
   return 0;
 }
