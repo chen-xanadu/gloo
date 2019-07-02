@@ -8,6 +8,7 @@ set(GLOO_HDRS)
 list(APPEND GLOO_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/algorithm.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/allgather.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/allgatherv.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/allreduce.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/allreduce_local.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/barrier.cc"
@@ -23,6 +24,7 @@ list(APPEND GLOO_HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/algorithm.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/allgather.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/allgather_ring.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/allgatherv.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/allreduce.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/allreduce_bcube.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/allreduce_halving_doubling.h"
@@ -57,17 +59,16 @@ if(USE_CUDA)
     )
 endif()
 
-# The builder links to both the base gloo library and gloo_cuda if
-# USE_CUDA is set. It can therefore not be part of either.
-list(APPEND GLOO_BUILDER_SRCS
-  "${CMAKE_CURRENT_SOURCE_DIR}/allreduce_builder.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/broadcast_builder.cc"
-  )
+if(USE_ROCM)
+  file(GLOB GLOO_HIP_SRCS
+    "${HIPIFY_OUTPUT_DIR}/hip*.cc"
+    "${HIPIFY_OUTPUT_DIR}/hip*.hip"
+    )
 
-list(APPEND GLOO_BUILDER_HDRS
-  "${CMAKE_CURRENT_SOURCE_DIR}/allreduce_builder.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/broadcast_builder.h"
-  )
+  file(GLOB GLOO_HIP_HDRS
+    "${HIPIFY_OUTPUT_DIR}/hip*.h"
+    )
+endif()
 
 add_subdirectory(common)
 add_subdirectory(mpi)
@@ -92,6 +93,7 @@ endif()
 # Set variables so macros have GLOO_ prefix.
 set(GLOO_USE_CUDA ${USE_CUDA})
 set(GLOO_USE_NCCL ${USE_NCCL})
+set(GLOO_USE_ROCM ${USE_ROCM})
 set(GLOO_USE_REDIS ${USE_REDIS})
 set(GLOO_USE_IBVERBS ${USE_IBVERBS})
 set(GLOO_USE_MPI ${USE_MPI})
@@ -99,20 +101,23 @@ set(GLOO_USE_AVX ${USE_AVX})
 configure_file(config.h.in config.h)
 
 add_library(gloo ${GLOO_STATIC_OR_SHARED} ${GLOO_SRCS})
-add_library(gloo_builder ${GLOO_STATIC_OR_SHARED} ${GLOO_BUILDER_SRCS})
 target_link_libraries(gloo PRIVATE ${gloo_DEPENDENCY_LIBS})
-target_link_libraries(gloo_builder PUBLIC gloo)
 if(USE_CUDA)
   cuda_add_library(gloo_cuda ${GLOO_CUDA_SRCS} ${GLOO_STATIC_OR_SHARED})
   target_link_libraries(gloo_cuda gloo ${gloo_cuda_DEPENDENCY_LIBS})
-  target_link_libraries(gloo_builder PUBLIC gloo_cuda)
+endif()
+if(USE_ROCM)
+  gloo_hip_add_library(gloo_hip ${GLOO_HIP_SRCS})
+  target_link_libraries(gloo_hip gloo)
 endif()
 
 # Add Interface include directories that are relocatable.
 target_include_directories(gloo INTERFACE $<INSTALL_INTERFACE:include>)
-target_include_directories(gloo_builder INTERFACE $<INSTALL_INTERFACE:include>)
 if(USE_CUDA)
   target_include_directories(gloo_cuda INTERFACE $<INSTALL_INTERFACE:include>)
+endif()
+if(USE_ROCM)
+  target_include_directories(gloo_hip INTERFACE $<INSTALL_INTERFACE:include>)
 endif()
 
 # Install if necessary.
@@ -121,10 +126,12 @@ endif()
 if(GLOO_INSTALL)
   install(TARGETS gloo EXPORT GlooTargets
       DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-  install(TARGETS gloo_builder EXPORT GlooTargets
-      DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
   if(USE_CUDA)
     install(TARGETS gloo_cuda EXPORT GlooTargets
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+  endif()
+  if(USE_ROCM)
+    install(TARGETS gloo_hip EXPORT GlooTargets
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
   endif()
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/config.h
@@ -134,13 +141,15 @@ if(GLOO_INSTALL)
     string(REGEX REPLACE "${CMAKE_CURRENT_SOURCE_DIR}" "gloo" DIR ${DIR})
     install(FILES ${HEADER} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${DIR})
   endforeach()
-  foreach(HEADER ${GLOO_BUILDER_HDRS})
-    string(REGEX MATCH "(.*)[/\\]" DIR ${HEADER})
-    string(REGEX REPLACE "${CMAKE_CURRENT_SOURCE_DIR}" "gloo" DIR ${DIR})
-    install(FILES ${HEADER} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${DIR})
-  endforeach()
   if(USE_CUDA)
     foreach(HEADER ${GLOO_CUDA_HDRS})
+      string(REGEX MATCH "(.*)[/\\]" DIR ${HEADER})
+      string(REGEX REPLACE "${CMAKE_CURRENT_SOURCE_DIR}" "gloo" DIR ${DIR})
+      install(FILES ${HEADER} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${DIR})
+    endforeach()
+  endif()
+  if(USE_ROCM)
+    foreach(HEADER ${GLOO_HIP_HDRS})
       string(REGEX MATCH "(.*)[/\\]" DIR ${HEADER})
       string(REGEX REPLACE "${CMAKE_CURRENT_SOURCE_DIR}" "gloo" DIR ${DIR})
       install(FILES ${HEADER} DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${DIR})
