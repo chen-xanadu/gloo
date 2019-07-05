@@ -157,10 +157,6 @@ class AllreduceOptions {
 
   template <typename T>
   void setOutputs(std::vector<T*> ptrs, size_t elements) {
-    if (algo == nullptr) {
-      algo = std::make_shared<AllreduceRing<T> >(
-          context, ptrs, elements);
-    }
     setOutputs(ptrs.data(), ptrs.size(), elements);
   }
 

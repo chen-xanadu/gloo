@@ -25,6 +25,7 @@ class Context {
   const int rank;
   const int size;
   int base;
+  int groups = 3;
 
   std::shared_ptr<transport::Device>& getDevice();
 

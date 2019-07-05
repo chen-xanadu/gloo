@@ -5,8 +5,10 @@
 
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
+#include "gloo/allreduce_bcube.h"
 #include "gloo/allreduce_grid.h"
 #include "gloo/allreduce_grid_ft.h"
+#include "gloo/allreduce_grid_ft2.h"
 #include "gloo/rendezvous/context.h"
 #include "gloo/rendezvous/file_store.h"
 #include "gloo/rendezvous/prefix_store.h"
