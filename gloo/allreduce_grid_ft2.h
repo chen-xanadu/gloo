@@ -100,6 +100,7 @@ public:
       const ReductionFunction<T>* fn = ReductionFunction<T>::sum)
       : Algorithm(context),
         myRank_(context_->rank),
+        groups_(context->groups),
         ptrs_(ptrs),
         totalNumElems_(count),
         bytes_(totalNumElems_ * sizeof(T)),
@@ -121,15 +122,14 @@ public:
                                            std::max(myRank_, myNode.leftPeerRank_));
     auto rightPairSlot = slotOffset_ + 3 * (std::min(myRank_, myNode.rightPeerRank_) * contextSize_ +
                                             std::max(myRank_, myNode.rightPeerRank_));
-    ringInbox_.reserve(2);
-    recvRingDataBufs_.reserve(2);
-    sendRingDataBufs_.reserve(2);
 
     for (int i = 0; i < 2; i++) {
       int recvSize = myNode.chunkSize_;
-      ringInbox_[i].reserve(recvSize);
-      recvRingDataBufs_[i] = leftPair->createRecvBuffer(leftPairSlot + i, &ringInbox_[i][0], recvSize * sizeof(T));
-      sendRingDataBufs_[i] = rightPair->createSendBuffer(rightPairSlot + i, ptrs_[0], bytes_);
+      ringInbox_.emplace_back(recvSize);
+      recvRingDataBufs_.push_back(
+          leftPair->createRecvBuffer(leftPairSlot + i, &ringInbox_[i][0], recvSize * sizeof(T)));
+      sendRingDataBufs_.push_back(
+          rightPair->createSendBuffer(rightPairSlot + i, ptrs_[0], bytes_));
     }
     sendRingNotificationBuf_ = leftPair->createSendBuffer(leftPairSlot + 2, &dummy_, sizeof(dummy_));
     recvRingNotificationBuf_ = rightPair->createRecvBuffer(rightPairSlot + 2, &dummy_, sizeof(dummy_));
@@ -229,7 +229,7 @@ protected:
     for (auto peerRank : getCrossGroupPeers(myRank_)) {
       int offset = allNodes_[myRank_].groupReduceOffset_;
       int length = allNodes_[myRank_].groupReduceNumElems_;
-      fn_->call(&ptrs_[0][offset], crossGroupInbox_[peerRank], length);
+      fn_->call(&ptrs_[0][offset], &crossGroupInbox_[peerRank][0], length);
     }
 
   }
@@ -254,7 +254,7 @@ protected:
 
       // Reduce
       if (length > 0) {
-        fn_->call(&ptrs_[0][offset], ringInbox_[chunkOffset & 1], length);
+        fn_->call(&ptrs_[0][offset], &ringInbox_[chunkOffset & 1][0], length);
       }
 
       // Send notification to node on the left that
@@ -274,7 +274,7 @@ protected:
 
   void inGroupAllGather() {
 
-    for (int round = 0; round < (chunks_ - 2); round++) {
+    for (round_ = 0; round_ < (chunks_ - 2); round_++) {
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
 
@@ -283,11 +283,11 @@ protected:
 
       // Copy
       if (length > 0) {
-        memcpy(&ptrs_[0][offset], ringInbox_[chunkOffset & 1], length * sizeof(T));
+        memcpy(&ptrs_[0][offset], &ringInbox_[chunkOffset & 1][0], length * sizeof(T));
       }
 
       // Skip copying in the last two rounds
-      if (round < (chunks_ - 4)) {
+      if (round_ < (chunks_ - 4)) {
         // Send notification to node on the left that
         // this node is ready for an inbox write.
         sendRingNotificationBuf_->send();
@@ -321,7 +321,7 @@ protected:
       int length = allNodes_[peerRank].groupReduceNumElems_;
       recvCrossGroupDataBufs_[peerRank]->waitRecv();
       if (length > 0) {
-        memcpy(&ptrs_[0][offset], crossGroupInbox_[peerRank], length * sizeof(T));
+        memcpy(&ptrs_[0][offset], &crossGroupInbox_[peerRank][0], length * sizeof(T));
       }
     }
 
@@ -359,10 +359,6 @@ protected:
   const int groups_;
   std::vector<grid::Node> allNodes_;
 
-  int allreduceNumElems_;
-  int allreduceBytes_;
-  size_t reduceOffset_;
-
   std::vector<std::vector<T>> ringInbox_;
   std::unordered_map<int, std::vector<T>> crossGroupInbox_;
   std::vector<T> backupInbox_;
@@ -387,6 +383,33 @@ protected:
 
   int chunks_;
   int round_;
+
+ private:
+  static constexpr int wordsPerSection = 3;
+  static constexpr int wordsPerLine = 3 * wordsPerSection;
+
+  static void printBreak(T* p, int x) {
+    if (0 == x % wordsPerLine) {
+      std::cout << std::endl
+                << &p[x] << " " << std::setfill('0') << std::setw(3) << x
+                << ": ";
+    } else if (0 == x % wordsPerSection) {
+      std::cout << "- ";
+    }
+  }
+
+  static void printElems(T* p, int count, int start = 0) {
+    auto alignedStart = (start / wordsPerLine) * wordsPerLine;
+    for (int x = alignedStart; x < start + count; ++x) {
+      printBreak(p, x);
+      if (x < start) {
+        std::cout << "..... ";
+      } else {
+        std::cout << std::setfill('0') << std::setw(3) << p[x] << " ";
+      }
+    }
+    std::cout << std::endl;
+  }
 };
 
 } // namespace gloo
