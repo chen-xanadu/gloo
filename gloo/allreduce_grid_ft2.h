@@ -12,6 +12,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <chrono>
+#include <set>
+#include <thread>
+#include <unordered_map>
+#include <iostream>
+#include <iomanip>
 
 #include "gloo/algorithm.h"
 #include "gloo/context.h"
@@ -28,6 +33,11 @@ class Node {
     group_ = rank / groupSize;
     groupRank_ = rank - group_ * groupSize;
 
+    for (int i = 0; i < groupSize; i++) {
+      if (i != groupRank_) {
+        groupPeerRanks_.push_back(group_ * groupSize + i);
+      }
+    }
     leftPeerRank_ = (groupSize + groupRank_ - 1) % groupSize + group_ * groupSize;
     rightPeerRank_ = (groupRank_ + 1) % groupSize + group_ * groupSize;
 
@@ -75,6 +85,7 @@ class Node {
   int rank_;
   int group_;
   int groupRank_;
+  std::vector<int> groupPeerRanks_;
   int leftPeerRank_;
   int rightPeerRank_;
   std::unordered_map<int, int> crossGroupPeerRanks_;
@@ -118,10 +129,8 @@ public:
     auto& leftPair = this->getPair(myNode.leftPeerRank_);
     auto& rightPair = this->getPair(myNode.rightPeerRank_);
 
-    auto leftPairSlot = slotOffset_ + 3 * (std::min(myRank_, myNode.leftPeerRank_) * contextSize_ +
-                                           std::max(myRank_, myNode.leftPeerRank_));
-    auto rightPairSlot = slotOffset_ + 3 * (std::min(myRank_, myNode.rightPeerRank_) * contextSize_ +
-                                            std::max(myRank_, myNode.rightPeerRank_));
+    auto leftPairSlot = getSlot(myRank_, myNode.leftPeerRank_);
+    auto rightPairSlot = getSlot(myRank_, myNode.rightPeerRank_);
 
     for (int i = 0; i < 2; i++) {
       int recvSize = myNode.chunkSize_;
@@ -140,8 +149,8 @@ public:
         int peerRank = myNode.crossGroupPeerRanks_[group];
         int recvSize = std::max(myNode.groupReduceNumElems_, allNodes_[peerRank].groupReduceNumElems_);
         auto& pair = this->getPair(peerRank);
-        auto slot = slotOffset_ + 3 * (std::min(myRank_, peerRank) * contextSize_ +
-                                       std::max(myRank_, peerRank));
+        auto slot = getSlot(myRank_, peerRank);
+
         std::vector<T> inbox(recvSize);
         crossGroupInbox_[peerRank] = inbox;
         sendCrossGroupDataBufs_[peerRank] = pair->createSendBuffer(slot, ptrs_[0], bytes_);
@@ -162,10 +171,13 @@ public:
       }
     }
 
+    recoverySlotOffset_ = this->context_->nextSlot(contextSize_);
+    recoveryNotificationBuf_ = context_->createUnboundBuffer(&recvMsg_, sizeof(recvMsg_));
+    recoveryThread = std::thread(&AllreduceGridFT2::recoveryFunction, this);
+
   }
 
   virtual ~AllreduceGridFT2() {
-
   }
 
   void run() {
@@ -181,8 +193,11 @@ public:
       }
       return;
     }
+    printAddr();
+    printElems(&ptrs_[0][0], totalNumElems_);
 
     crossGroupReduceScatter();
+    printElems(&ptrs_[0][0], totalNumElems_);
 
     inGroupReduceScatter();
 
@@ -190,11 +205,19 @@ public:
 
     crossGroupAllGather();
 
+
+    if (myRank_ == getNextAvailableRank(0)) {
+      signalNodeFailure(-1);
+    }
+
+    recoveryThread.join();
+
     // Broadcast ptrs_[0]
     for (int i = 1; i < ptrs_.size(); i++) {
       memcpy(ptrs_[i], ptrs_[0], bytes_);
     }
   }
+
 
 protected:
   void crossGroupReduceScatter() {
@@ -232,8 +255,14 @@ protected:
       fn_->call(&ptrs_[0][offset], &crossGroupInbox_[peerRank][0], length);
     }
 
-  }
+    {
+      int recvBackupPeerRank = allNodes_[myRank_].recvBackupPeerRank_;
+      int offset = allNodes_[recvBackupPeerRank].groupReduceOffset_;
+      int length = allNodes_[recvBackupPeerRank].groupReduceNumElems_;
+      fn_->call(&ptrs_[0][offset], &backupInbox_[0], length);
+    }
 
+  }
 
   void inGroupReduceScatter() {
 
@@ -246,6 +275,8 @@ protected:
     }
 
     for (round_ = 2; round_ < chunks_; round_++) {
+      insertFailure();
+
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
 
@@ -261,16 +292,22 @@ protected:
       // this node is ready for an inbox write.
       sendRingNotificationBuf_->send();
 
-      // Wait for notification from node on the right
-      // to be sure this node can start an inbox write.
-      recvRingNotificationBuf_->waitRecv();
+      if (proxyNodes_.empty()) {
+        // Wait for notification from node on the right
+        // to be sure this node can start an inbox write.
+        recvRingNotificationBuf_->waitRecv();
 
-      // Copy accumulated chunk
-      sendRingDataBufs_[chunkOffset & 1]->send(offset * sizeof(T), length * sizeof(T));
+        // Copy accumulated chunk
+        sendRingDataBufs_[chunkOffset & 1]->send(offset * sizeof(T), length * sizeof(T));
+
+      } else {
+        proxyInGroupReduceScatter();
+      }
+
+      printElems(&ptrs_[0][0], totalNumElems_);
     }
 
   }
-
 
   void inGroupAllGather() {
 
@@ -292,28 +329,34 @@ protected:
         // this node is ready for an inbox write.
         sendRingNotificationBuf_->send();
 
-        // Wait for notification from node on the right
-        // to be sure this node can start an inbox write.
-        recvRingNotificationBuf_->waitRecv();
+        if (proxyNodes_.empty()) {
+          // Wait for notification from node on the right
+          // to be sure this node can start an inbox write.
+          recvRingNotificationBuf_->waitRecv();
 
-        // Copy accumulated chunks
-        sendRingDataBufs_[chunkOffset & 1]->send(offset * sizeof(T), length * sizeof(T));
+          // Copy accumulated chunks
+          sendRingDataBufs_[chunkOffset & 1]->send(offset * sizeof(T), length * sizeof(T));
+        }
       }
+
+      if (!proxyNodes_.empty()) {
+        proxyInGroupAllGather();
+      }
+
+      printElems(&ptrs_[0][0], totalNumElems_);
     }
 
-    // Final barrier to make sure every node has finished
-    // Otherwise, a second all reduce call might interfere
-    // with one that it still in progress on some nodes.
-    sendRingNotificationBuf_->send();
-    recvRingNotificationBuf_->waitRecv();
-  }
 
+
+  }
 
   void crossGroupAllGather() {
     for (auto peerRank : getCrossGroupPeers(myRank_)) {
-      int offset = allNodes_[myRank_].groupReduceOffset_;
-      int length = allNodes_[myRank_].groupReduceNumElems_;
-      sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
+      if (allNodes_[peerRank].groupRank_ == allNodes_[myRank_].groupRank_) {
+        int offset = allNodes_[myRank_].groupReduceOffset_;
+        int length = allNodes_[myRank_].groupReduceNumElems_;
+        sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
+      }
     }
 
     for (auto peerRank : getCrossGroupPeers(myRank_)) {
@@ -333,8 +376,172 @@ protected:
       recvCrossGroupNotificationBufs_[peerRank]->waitRecv();
     }
 
+    if (!proxyNodes_.empty()) {
+      proxyCrossGroupAllGather();
+    }
+
+    printElems(&ptrs_[0][0], totalNumElems_);
+
+    // Final barrier to make sure every node has finished
+    // Otherwise, a second all reduce call might interfere
+    // with one that it still in progress on some nodes.
+    sendRingNotificationBuf_->send();
+
+    if (proxyNodes_.empty()) {
+      recvRingNotificationBuf_->waitRecv();
+    } else {
+      proxyNodes_[0].recvRingNotificationBuf_->waitRecv();
+    }
+
   }
 
+
+  void recoveryFunction() {
+    std::vector<int> allRanks(contextSize_);
+    for (int rank = 0; rank < contextSize_; ++rank) {
+      if (rank != myRank_) {
+        allRanks.push_back(rank);
+      }
+    }
+    while (recvMsg_ != -1) {
+      recoveryNotificationBuf_->recv(allRanks, recoverySlotOffset_ + myRank_);
+      recoveryNotificationBuf_->waitRecv();
+      std::cout << "Unbounded message: " << recvMsg_ << std::endl;
+      if (recvMsg_ >= 0) {
+        failedNodeRanks_.insert(recvMsg_);
+      }
+    }
+    int lowestAvailableRank = getNextAvailableRank(0);
+    if (myRank_ == getNextAvailableRank(lowestAvailableRank + 1)) {
+      recoveryNotificationBuf_->send(lowestAvailableRank, recoverySlotOffset_ + lowestAvailableRank);
+      recoveryNotificationBuf_->waitSend();
+    }
+    std::cout << "Recovery finished" << std::endl;
+  }
+
+  void signalNodeFailure(int rank) {
+    failedNodeRanks_.insert(rank);
+    sendMsg_ = rank;
+    std::vector<std::unique_ptr<transport::UnboundBuffer>> notifs;
+    for (int dstRank : getAvailablePeerRanks()) {
+        notifs.push_back(context_->createUnboundBuffer(&sendMsg_, sizeof(sendMsg_)));
+        notifs[notifs.size()-1]->send(dstRank, recoverySlotOffset_ + dstRank);
+    }
+    for (auto & notif : notifs) {
+      notif->waitSend();
+    }
+  }
+
+  void repairRightPeer(int failedNodeRank) {
+    std::cout << "repair" << std::endl;
+
+    grid::Node& myNode = allNodes_[myRank_];
+    grid::Node& failedNode = allNodes_[failedNodeRank];
+
+    struct {
+      int recoveryPeerRank;
+      bool isRequested;
+    } backupRequestMsg;
+
+    backupRequestMsg.recoveryPeerRank = myRank_;
+    backupRequestMsg.isRequested = true;
+
+    std::vector<std::unique_ptr<transport::UnboundBuffer>> notifs;
+    for (int dstRank : getCrossGroupPeers(failedNodeRank)) {
+      notifs.push_back(context_->createUnboundBuffer(&backupRequestMsg, sizeof(backupRequestMsg)));
+      notifs[notifs.size()-1]->send(dstRank, 9999 + dstRank);
+    }
+    for (auto & notif : notifs) {
+      notif->waitSend();
+    }
+
+    proxyNodes_.emplace_back();
+
+    ProxyNode& proxy = proxyNodes_.back();
+
+    setupProxy(proxy, failedNode);
+
+    notifs.clear();
+    for (int dstRank : getCrossGroupPeers(failedNodeRank)) {
+      notifs.push_back(context_->createUnboundBuffer(&backupRequestMsg, sizeof(backupRequestMsg)));
+      notifs[notifs.size()-1]->send(dstRank, 9999 + dstRank);
+    }
+    for (auto & notif : notifs) {
+      notif->waitSend();
+    }
+
+    std::cout << "finished" << std::endl;
+
+  }
+
+  void repairLeftPeer(int failedNodeRank) {
+    std::cout << "repair" << std::endl;
+
+    grid::Node& myNode = allNodes_[myRank_];
+    grid::Node& failedNode = allNodes_[failedNodeRank];
+
+    auto& leftPair = this->getPair(failedNode.leftPeerRank_);
+    auto leftPairSlot = getSlot(myRank_, failedNode.leftPeerRank_, true);
+
+    recvRingDataBufs_.clear();
+    for (int i = 0; i < 2; i++) {
+      int recvSize = myNode.chunkSize_;
+      recvRingDataBufs_.push_back(
+          leftPair->createRecvBuffer(leftPairSlot + i, &ringInbox_[i][0], recvSize * sizeof(T)));
+    }
+    sendRingNotificationBuf_ = leftPair->createSendBuffer(leftPairSlot + 2, &dummy_, sizeof(dummy_));
+
+    std::cout << "finish" << std::endl;
+  }
+
+  void repairCrossGroupPeer(int failedNodeRank) {
+    std::cout << "repair" << std::endl;
+
+    grid::Node& myNode = allNodes_[myRank_];
+    grid::Node& failedNode = allNodes_[failedNodeRank];
+
+    struct {
+      int recoveryPeerRank;
+      bool isRequested;
+    } backupRequestMsg;
+
+    std::unique_ptr<transport::UnboundBuffer> repairNotificationBuf =
+        context_->createUnboundBuffer(&backupRequestMsg, sizeof(backupRequestMsg));
+
+    repairNotificationBuf->recv(failedNode.groupPeerRanks_, 9999 + myRank_);
+    repairNotificationBuf->waitRecv();
+
+    if (backupRequestMsg.isRequested) {
+      int slot = getSlot(myRank_, backupRequestMsg.recoveryPeerRank, true);
+      auto& pair = this->getPair(backupRequestMsg.recoveryPeerRank);
+      auto sendBackupBuf = pair->createSendBuffer(slot, ptrs_[0], bytes_);
+
+      int offset = failedNode.groupReduceOffset_;
+      int length = failedNode.groupReduceNumElems_;
+      sendBackupBuf->send(offset * sizeof(T), length * sizeof(T));
+
+      repairNotificationBuf->recv(backupRequestMsg.recoveryPeerRank, 9999 + myRank_);
+      repairNotificationBuf->waitRecv();
+    }
+
+
+    // TODO: split into multiple buffers
+    myNode.crossGroupPeerRanks_[failedNode.group_] = backupRequestMsg.recoveryPeerRank;
+    int slot = getSlot(myRank_, backupRequestMsg.recoveryPeerRank);
+    auto& pair = this->getPair(backupRequestMsg.recoveryPeerRank);
+
+    int recvSize = std::max(myNode.groupReduceNumElems_, failedNode.groupReduceNumElems_);
+    std::vector<T> inbox(recvSize);
+    crossGroupInbox_[backupRequestMsg.recoveryPeerRank] = inbox;
+    recvCrossGroupDataBufs_[backupRequestMsg.recoveryPeerRank] =
+        pair->createRecvBuffer(slot, &crossGroupInbox_[backupRequestMsg.recoveryPeerRank][0], recvSize * sizeof(T));
+    sendCrossGroupNotificationBufs_[backupRequestMsg.recoveryPeerRank] =
+        pair->createSendBuffer(slot + 2, &dummy_, sizeof(dummy_));
+    recvCrossGroupNotificationBufs_[backupRequestMsg.recoveryPeerRank] =
+        pair->createRecvBuffer(slot + 2, &dummy_, sizeof(dummy_));
+
+    std::cout << "finish" << std::endl;
+  }
 
   std::vector<int> getCrossGroupPeers(int rank) {
     std::vector<int> peerRanks;
@@ -348,6 +555,32 @@ protected:
     return allNodes_[rank].getChunkPosPerRound(round);
   }
 
+  int getNextAvailableRank(int rank) {
+    for (int rank2 = rank; rank2 < contextSize_ + rank; rank2++) {
+      if (failedNodeRanks_.find(rank2 % contextSize_) == failedNodeRanks_.end()) {
+        return rank2 % contextSize_;
+      }
+    }
+    return -1;
+  }
+
+  std::vector<int> getAvailablePeerRanks() {
+    std::vector<int> allRanks;
+    for (int rank = 0; rank < contextSize_; rank++) {
+      if (failedNodeRanks_.find(rank) == failedNodeRanks_.end() && rank != myRank_) {
+        allRanks.push_back(rank);
+      }
+    }
+    return allRanks;
+  }
+
+  int getSlot(int rank1, int rank2, bool repairMode = false) {
+    if (!repairMode) {
+      return slotOffset_ + 3 * (std::min(rank1, rank2) * contextSize_ + std::max(rank1, rank2));
+    } else {
+      return slotOffset_ + 3 * (std::max(rank1, rank2) * contextSize_ + std::min(rank1, rank2));
+    }
+  }
 
   const int myRank_;
 
@@ -384,8 +617,40 @@ protected:
   int chunks_;
   int round_;
 
+  std::set<int> failedNodeRanks_;
+
+  int recoverySlotOffset_;
+  int recvMsg_;
+  int sendMsg_;
+  std::unique_ptr<transport::UnboundBuffer> recoveryNotificationBuf_;
+  std::thread recoveryThread;
+
+  class ProxyNode {
+   public:
+    ProxyNode();
+
+    int rank_;
+    std::vector<T*> ptrs_;
+    std::vector<std::unique_ptr<transport::Buffer>> sendRingDataBufs_;
+    std::unique_ptr<transport::Buffer> recvRingNotificationBuf_;
+
+    std::unordered_map<int, std::unique_ptr<transport::Buffer>> sendCrossGroupDataBufs_;
+    std::unordered_map<int, std::unique_ptr<transport::Buffer>> sendCrossGroupNotificationBufs_;
+    std::unordered_map<int, std::unique_ptr<transport::Buffer>> recvCrossGroupNotificationBufs_;
+
+  };
+
+
+  std::vector<ProxyNode> proxyNodes_;
+
+  void setupProxy(ProxyNode& proxy, grid::Node& original);
+  void proxyInGroupReduceScatter();
+  void proxyInGroupAllGather();
+  void proxyCrossGroupAllGather();
+
+
  private:
-  static constexpr int wordsPerSection = 3;
+  static constexpr int wordsPerSection = 2;
   static constexpr int wordsPerLine = 3 * wordsPerSection;
 
   static void printBreak(T* p, int x) {
@@ -409,6 +674,33 @@ protected:
       }
     }
     std::cout << std::endl;
+  }
+
+  void printAddr() {
+    for (int i = 0; i < contextSize_; i++) {
+      if (i == contextRank_) continue;
+      auto &pair = context_->getPair(i);
+      std::cout << "Pair " << i << ": " << pair->address().str() << std::endl;
+    }
+  }
+
+  void insertFailure() {
+    if (round_ == 4) {
+      if (myRank_ == 1) {
+        sleep(5);
+        return;
+      }
+      if (myRank_ == 0) {
+        repairRightPeer(1);
+      }
+      if (myRank_ == 2) {
+        repairLeftPeer(1);
+      }
+      if (myRank_ % 3 == 1) {
+        repairCrossGroupPeer(1);
+      }
+    }
+
   }
 };
 
