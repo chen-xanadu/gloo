@@ -60,13 +60,6 @@ void AllreduceGridFT2<T>::setupProxy(AllreduceGridFT2::ProxyNode &proxy, grid::N
 
   printElems(&proxy.ptrs_[0][0], 6);
 
-  struct Status {
-    Phase phase;
-    int round;
-    bool requestData;
-    bool requestNotification;
-  };
-
   Status myStatus {phase_, round_, false, requestNotification};
   Status peerStatus;
 
@@ -163,14 +156,29 @@ template<typename T>
 void AllreduceGridFT2<T>::proxyCrossGroupAllGather() {
   ProxyNode& proxy = proxyNodes_[0];
 
-  for (auto peerRank : getCrossGroupPeers(proxy.rank_)) {
-    int offset = allNodes_[myRank_].groupReduceOffset_;
-    int length = allNodes_[myRank_].groupReduceNumElems_;
-    proxy.sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
+  std::vector<int> peerRanks = getCrossGroupPeers(proxy.rank_);
+  std::unordered_map<int, std::unique_ptr<transport::UnboundBuffer>> recvRequestBufs;
+  std::unordered_map<int, AllGatherRequest> requests;
+
+  for (int peerRank : peerRanks) {
+    auto& pair = this->getPair(peerRank);
+    auto slot = getSlot(myRank_, peerRank);
+
+    requests[peerRank] = {-1, -1, -1};
+    recvRequestBufs[peerRank] =
+        context_->createUnboundBuffer(&requests[peerRank], sizeof(AllGatherRequest));
+
+    recvRequestBufs[peerRank]->recv(peerRank, slot + 1);
+    std::cout << "wait requests from  " << peerRank << " (slot " << slot + 1 << ")" << std::endl;
   }
 
+
   for (auto peerRank : getCrossGroupPeers(proxy.rank_)) {
-    proxy.sendCrossGroupNotificationBufs_[peerRank]->send();
+    recvRequestBufs[peerRank]->waitRecv();
+    int offset = requests[peerRank].offset;
+    int length = requests[peerRank].length;
+    std::cout << "send data to " << peerRank << " (slot " << proxy.sendCrossGroupDataBufs_[peerRank]->getSlot() << ")" << std::endl;
+    proxy.sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
   }
 
   for (auto peerRank : getCrossGroupPeers(proxy.rank_)) {
