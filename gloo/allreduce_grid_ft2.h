@@ -225,9 +225,7 @@ public:
     }
 
 
-    if (myRank_ == getNextAvailableRank(0)) {
-      signalNodeFailure(-1);
-    }
+    signalCompletion();
 
     recoveryThread_.join();
 
@@ -603,7 +601,8 @@ protected:
         allRanks.push_back(rank);
       }
     }
-    while (recvMsg_ != -1) {
+    int numNodeCompleted = 0;
+    while (numNodeCompleted + failedNodeRanks_.size() != contextSize_ - 1) {
       recoveryNotificationBuf_->recv(allRanks, recoverySlotOffset_ + myRank_);
       recoveryNotificationBuf_->waitRecv();
       std::cout << "Unbounded message: " << recvMsg_ << std::endl;
@@ -620,12 +619,11 @@ protected:
           proxyThreads_.emplace_back(&AllreduceGridFT2::repairGroupPeer, this, rank);
         }
       }
+      if (recvMsg_ == -1) {
+        numNodeCompleted++;
+      }
     }
-    int lowestAvailableRank = getNextAvailableRank(0);
-    if (myRank_ == getNextAvailableRank(lowestAvailableRank + 1)) {
-      recoveryNotificationBuf_->send(lowestAvailableRank, recoverySlotOffset_ + lowestAvailableRank);
-      recoveryNotificationBuf_->waitSend();
-    }
+
     std::cout << "Recovery finished" << std::endl;
   }
 
@@ -636,6 +634,18 @@ protected:
     for (int dstRank : getAvailablePeerRanks()) {
         notifs.push_back(context_->createUnboundBuffer(&sendMsg_, sizeof(sendMsg_)));
         notifs[notifs.size()-1]->send(dstRank, recoverySlotOffset_ + dstRank);
+    }
+    for (auto & notif : notifs) {
+      notif->waitSend();
+    }
+  }
+
+  void signalCompletion() {
+    sendMsg_ = -1;
+    std::vector<std::unique_ptr<transport::UnboundBuffer>> notifs;
+    for (int dstRank : getAvailablePeerRanks()) {
+      notifs.push_back(context_->createUnboundBuffer(&sendMsg_, sizeof(sendMsg_)));
+      notifs[notifs.size()-1]->send(dstRank, recoverySlotOffset_ + dstRank);
     }
     for (auto & notif : notifs) {
       notif->waitSend();
