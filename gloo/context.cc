@@ -72,4 +72,12 @@ std::chrono::milliseconds Context::getTimeout() const {
   return timeout_;
 }
 
+void Context::updateFailedNodes(std::set<int> &ranks) {
+  failedNodeRanks.insert(ranks.begin(), ranks.end());
+}
+
+int Context::getSize() {
+  return size - failedNodeRanks.size();
+}
+
 } // namespace gloo

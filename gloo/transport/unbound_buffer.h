@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <iostream>
 
 namespace gloo {
 namespace transport {
@@ -103,6 +104,55 @@ class UnboundBuffer {
       uint64_t slot,
       size_t offset = 0,
       size_t nbytes = UINT64_MAX) = 0;
+
+
+  bool trySend(
+      int dstRank,
+      uint64_t slot,
+      size_t offset = 0,
+      size_t nbytes = UINT64_MAX) {
+    try {
+      send(dstRank, slot, offset, nbytes);
+    } catch (...) {
+      std::cout << "send exception caught" << std::endl;
+      return false;
+    }
+    return true;
+  }
+
+  bool tryRecv(
+      std::vector<int> srcRanks,
+      uint64_t slot,
+      size_t offset = 0,
+      size_t nbytes = UINT64_MAX) {
+    try {
+      recv(srcRanks, slot, offset, nbytes);
+    } catch (...) {
+      std::cout << "recv exception caught" << std::endl;
+      return false;
+    }
+    return true;
+  }
+
+  bool tryWaitSend() {
+    try {
+      waitSend();
+    } catch (...) {
+      std::cout << "send exception caught" << std::endl;
+      return false;
+    }
+    return true;
+  }
+
+  bool tryWaitRecv() {
+    try {
+      waitRecv();
+    } catch (...) {
+      std::cout << "recv exception caught" << std::endl;
+      return false;
+    }
+    return true;
+  }
 };
 
 } // namespace transport

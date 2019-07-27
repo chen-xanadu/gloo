@@ -81,6 +81,7 @@ void Buffer::waitRecv() {
 
 bool Buffer::tryWaitRecv() {
   try {
+    pair_->verifyConnected();
     waitRecv();
   } catch (...) {
     std::cout << "recv exception caught: " << this->pair_->address().str() << std::endl;

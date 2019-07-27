@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <vector>
+#include <set>
 
 #include "gloo/transport/context.h"
 #include "gloo/transport/device.h"
@@ -26,6 +27,8 @@ class Context {
   const int size;
   int base;
   int groups = 3;
+
+  std::set<int> failedNodeRanks;
 
   std::shared_ptr<transport::Device>& getDevice();
 
@@ -44,6 +47,10 @@ class Context {
   void setTimeout(std::chrono::milliseconds timeout);
 
   std::chrono::milliseconds getTimeout() const;
+
+  int getSize();
+
+  void updateFailedNodes(std::set<int> &ranks);
 
  protected:
   std::shared_ptr<transport::Device> device_;
