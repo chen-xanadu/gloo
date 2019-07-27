@@ -221,12 +221,7 @@ void AllreduceGridFT2<T>::repairLeftPeer() {
   std::cout << "my status: " << myStatus.round << std::endl;
 
   // TODO: handle different phase
-  if (requestRoundData_) {
-    int chunkOffset, offset, length;
-    std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round);
-
-    recvRingDataBufs_[chunkOffset & 1]->waitRecv();
-  } else {
+  if (roundNotificationSent_) {
     sendRingNotificationBuf_->send();
   }
 
@@ -384,7 +379,7 @@ void AllreduceGridFT2<T>::proxyInGroupReduceScatter() {
 
   int localOffset = offset - allNodes_[proxy.rank_].groupReduceOffset_;
 
-  if (length > 0) {
+  if (length > 0 && round_ >= 2) {
     fn_->call(&proxy.ptrs_[0][localOffset], &ptrs_[0][offset], length);
   }
 

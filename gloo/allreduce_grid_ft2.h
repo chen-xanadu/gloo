@@ -351,14 +351,17 @@ protected:
       std::cout << "wait data at " << chunkOffset;
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       std::cout << "(acquire lock)" << std::endl;
+      requestRoundData_ = true;
+      roundNotificationSent_ = false;
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
       std::cout << " ("  << ringInbox_[chunkOffset & 1][0] << ")" << std::endl;
       if (!success) {
         // TODO: handle existing repair thread
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
-        requestRoundData_ = true;
         leftPairCV_.wait(lock);
+        recvRingDataBufs_[chunkOffset & 1]->waitRecv();
       }
+      requestRoundData_ = false;
       lock.unlock();
     };
 
@@ -368,9 +371,10 @@ protected:
       bool success = sendRingNotificationBuf_->trySend();
       if (!success) {
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, false);
-        requestRoundData_ = false;
         leftPairCV_.wait(lock);
+        sendRingNotificationBuf_->send();
       }
+      roundNotificationSent_ = true;
       lock.unlock();
     };
 
@@ -458,6 +462,7 @@ protected:
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
         requestRoundData_ = true;
         leftPairCV_.wait(lock);
+        recvRingDataBufs_[chunkOffset & 1]->waitRecv();
       }
       lock.unlock();
     };
@@ -470,6 +475,7 @@ protected:
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, false);
         requestRoundData_ = false;
         leftPairCV_.wait(lock);
+        sendRingNotificationBuf_->send();
       }
       lock.unlock();
     };
@@ -837,6 +843,7 @@ protected:
   std::mutex leftPairMutex_;
   std::condition_variable leftPairCV_;
   bool requestRoundData_ = true;
+  bool roundNotificationSent_ = false;
 
   std::vector<std::thread> proxyThreads_;
   std::mutex proxyMutex_;
