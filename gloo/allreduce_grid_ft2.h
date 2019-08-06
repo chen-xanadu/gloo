@@ -118,9 +118,7 @@ public:
         totalNumElems_(count),
         bytes_(totalNumElems_ * sizeof(T)),
         fn_(fn){
-    if (myRank_ == 1) {
-      exit(0);
-    }
+
     for (int rank = 0; rank < contextSize_; ++rank) {
       allNodes_.emplace_back(rank, totalNumElems_, context_);
     }
@@ -347,7 +345,7 @@ protected:
   void inGroupReduceScatter() {
     phase_ = InGroupReduceScatter;
 
-    auto waitData = [&](int chunkOffset) {
+    auto recvData = [&](int chunkOffset) {
       std::cout << "wait data at " << chunkOffset;
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       std::cout << "(acquire lock)" << std::endl;
@@ -356,7 +354,6 @@ protected:
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
       std::cout << " ("  << ringInbox_[chunkOffset & 1][0] << ")" << std::endl;
       if (!success) {
-        // TODO: handle existing repair thread
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
         leftPairCV_.wait(lock);
         recvRingDataBufs_[chunkOffset & 1]->waitRecv();
@@ -378,7 +375,7 @@ protected:
       lock.unlock();
     };
 
-    auto waitNotification = [&]() {
+    auto recvNotification = [&]() {
       if (!proxyNodes_.empty())  return;
       std::cout << "wait notification" << std::endl;
       bool success = recvRingNotificationBuf_->tryWaitRecv();
@@ -415,13 +412,12 @@ protected:
 
     for (round_ = 2; round_ < chunks_; round_++) {
       std::cout << "in-group reduce-scatter round " << round_ << std::endl;
-      insertFailure();
 
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
 
       // Wait for inbox write to complete
-      waitData(chunkOffset);
+      recvData(chunkOffset);
 
       // Reduce
       if (length > 0) {
@@ -435,7 +431,7 @@ protected:
 
       // Wait for notification from node on the right
       // to be sure this node can start an inbox write.
-      waitNotification();
+      recvNotification();
 
       // Copy accumulated chunk
       sendData(chunkOffset, offset, length);
@@ -453,17 +449,19 @@ protected:
   void inGroupAllGather() {
     phase_ = InGroupAllGather;
 
-    auto waitData = [&](int chunkOffset) {
+    auto recvData = [&](int chunkOffset) {
       std::cout << "wait data at " << chunkOffset << std::endl;
       std::unique_lock<std::mutex> lock(leftPairMutex_);
+      requestRoundData_ = true;
+      roundNotificationSent_ = false;
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
       if (!success) {
         // TODO: handle existing repair thread
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
-        requestRoundData_ = true;
         leftPairCV_.wait(lock);
         recvRingDataBufs_[chunkOffset & 1]->waitRecv();
       }
+      requestRoundData_ = false;
       lock.unlock();
     };
 
@@ -473,14 +471,14 @@ protected:
       bool success = sendRingNotificationBuf_->trySend();
       if (!success) {
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, false);
-        requestRoundData_ = false;
         leftPairCV_.wait(lock);
         sendRingNotificationBuf_->send();
       }
+      roundNotificationSent_ = true;
       lock.unlock();
     };
 
-    auto waitNotification = [&]() {
+    auto recvNotification = [&]() {
       if (!proxyNodes_.empty())  return;
       std::cout << "wait notification" << std::endl;
       bool success = recvRingNotificationBuf_->tryWaitRecv();
@@ -500,11 +498,12 @@ protected:
 
     for (round_ = 0; round_ < (chunks_ - 2); round_++) {
       std::cout << "in-group all-gather round " << round_ << std::endl;
+      insertFailure();
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
 
       // Wait for inbox write to complete
-      waitData(chunkOffset);
+      recvData(chunkOffset);
 
       // Copy
       if (length > 0) {
@@ -520,7 +519,7 @@ protected:
         if (proxyNodes_.empty()) {
           // Wait for notification from node on the right
           // to be sure this node can start an inbox write.
-          waitNotification();
+          recvNotification();
 
           // Copy accumulated chunks
           sendData(chunkOffset, offset, length);
@@ -535,6 +534,9 @@ protected:
 
 
     }
+
+    sendNotification();
+    recvNotification();
 
   }
 
@@ -591,7 +593,7 @@ protected:
 
 
     for (auto peerRank : getCrossGroupPeers(myRank_)) {
-      recvCrossGroupNotificationBufs_[peerRank]->waitRecv();
+      recvCrossGroupNotificationBufs_[peerRank]->tryWaitRecv();
     }
 
     lock.unlock();
@@ -603,12 +605,12 @@ protected:
     // Final barrier to make sure every node has finished
     // Otherwise, a second all reduce call might interfere
     // with one that it still in progress on some nodes.
-    sendRingNotificationBuf_->send();
+    sendRingNotificationBuf_->trySend();
 
     if (proxyNodes_.empty()) {
-      recvRingNotificationBuf_->waitRecv();
+      recvRingNotificationBuf_->tryWaitRecv();
     } else {
-      proxyNodes_[0].recvRingNotificationBuf_->waitRecv();
+      proxyNodes_[0].recvRingNotificationBuf_->tryWaitRecv();
     }
 
 
@@ -924,7 +926,7 @@ protected:
   }
 
   void insertFailure() {
-    if (round_ == 4) {
+    if (round_ == 2) {
       if (myRank_ == 1) {
         exit(0);
       }

@@ -383,7 +383,7 @@ void AllreduceGridFT2<T>::proxyInGroupReduceScatter() {
     fn_->call(&proxy.ptrs_[0][localOffset], &ptrs_[0][offset], length);
   }
 
-  if (round_ >= proxy.startRound_) {
+  if (proxy.startPhase_ <= InGroupReduceScatter && round_ >= proxy.startRound_) {
     std::cout << "proxy wait notification" << std::endl;
     proxy.recvRingNotificationBuf_->waitRecv();
   }
@@ -409,8 +409,11 @@ void AllreduceGridFT2<T>::proxyInGroupAllGather() {
   }
 
   if (round_ < (chunks_ - 4)) {
-    std::cout << "proxy wait notification" << std::endl;
-    proxy.recvRingNotificationBuf_->waitRecv();
+    if (proxy.startPhase_ < InGroupAllGather ||
+        (proxy.startPhase_ == InGroupAllGather && round_ >= proxy.startRound_)) {
+      std::cout << "proxy wait notification" << std::endl;
+      proxy.recvRingNotificationBuf_->waitRecv();
+    }
 
     std::cout << "proxy send data at " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")" << std::endl;
     proxy.sendRingDataBufs_[chunkOffset & 1]->send(localOffset * sizeof(T), length * sizeof(T));
