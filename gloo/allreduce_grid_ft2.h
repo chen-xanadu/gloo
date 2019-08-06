@@ -324,7 +324,7 @@ protected:
       fn_->call(&ptrs_[0][offset], &crossGroupInbox_[peerRank][0], length);
     }
 
-    {
+    if (!isNodeFailed(recvBackupPeerRank)) {
       int offset = allNodes_[recvBackupPeerRank].groupReduceOffset_;
       int length = allNodes_[recvBackupPeerRank].groupReduceNumElems_;
       fn_->call(&ptrs_[0][offset], &backupInbox_[0], length);
