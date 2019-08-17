@@ -29,12 +29,12 @@ void AllreduceGridFT2<T>::setupProxy(AllreduceGridFT2::ProxyNode &proxy, grid::N
   auto recvStatusBuf =
       rightPair->createRecvBuffer(requestSlotOffset_ + original.rightPeerRank_, &peerStatus, sizeof(Status));
 
-  std::cout << "exchange status" << std::endl;
+  DEBUG("exchange status");
   sendStatusBuf->send();
   recvStatusBuf->waitRecv();
 
-  std::cout << "peer status: " << peerStatus.round <<  (peerStatus.requestData ? " requested" : "") << std::endl;
-  std::cout << "my status: " << myStatus.round << std::endl;
+  DEBUG("peer status: " << peerStatus.round <<  (peerStatus.requestData ? " requested" : ""));
+  DEBUG("my status: " << myStatus.round);
 
   // TODO: handle different phase
   proxy.startRound_ = peerStatus.round;
@@ -133,7 +133,7 @@ void AllreduceGridFT2<T>::setupProxy(AllreduceGridFT2::ProxyNode &proxy, grid::N
     std::tie(chunkOffset, offset, length) = getChunkPosPerRound(original.rightPeerRank_, round % chunks_);
     int localOffset = offset - allNodes_[proxy.rank_].groupReduceOffset_;
 
-    std::cout << "send chunk " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")" << std::endl;
+    DEBUG("send chunk " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")");
     proxy.sendRingDataBufs_[chunkOffset & 1]->send(localOffset * sizeof(T), length * sizeof(T));
   }
 
@@ -159,7 +159,7 @@ void AllreduceGridFT2<T>::setupProxy(AllreduceGridFT2::ProxyNode &proxy, grid::N
 
 template<typename T>
 void AllreduceGridFT2<T>::repairRightPeer(bool requestNotification) {
-  std::cout << "repair right" << std::endl;
+  DEBUG("repair right");
 
   grid::Node& myNode = allNodes_[myRank_];
   grid::Node& failedNode = allNodes_[myNode.rightPeerRank_];
@@ -172,20 +172,20 @@ void AllreduceGridFT2<T>::repairRightPeer(bool requestNotification) {
 
   ProxyNode& proxy = proxyNodes_.back();
 
-  std::cout << "proxy" << std::endl;
+  DEBUG("proxy");
   setupProxy(proxy, failedNode, requestNotification);
 
 
 //  signal.join();
 
-  std::cout << "finished" << std::endl;
+  DEBUG("finished");
 
 }
 
 
 template<typename T>
 void AllreduceGridFT2<T>::repairLeftPeer() {
-  std::cout << "repair left" << std::endl;
+  DEBUG("repair left");
   std::unique_lock<std::mutex> lock(leftPairMutex_);
 
   grid::Node& myNode = allNodes_[myRank_];
@@ -213,12 +213,12 @@ void AllreduceGridFT2<T>::repairLeftPeer() {
   auto recvStatusBuf =
       leftPair->createRecvBuffer(requestSlotOffset_ + myRank_, &peerStatus, sizeof(Status));
 
-  std::cout << "exchange status" << std::endl;
+  DEBUG("exchange status");
   sendStatusBuf->send();
   recvStatusBuf->waitRecv();
 
-  std::cout << "peer status: " << peerStatus.round <<  (peerStatus.requestNotification ? " requested" : "") << std::endl;
-  std::cout << "my status: " << myStatus.round << std::endl;
+  DEBUG("peer status: " << peerStatus.round <<  (peerStatus.requestNotification ? " requested" : ""));
+  DEBUG("my status: " << myStatus.round);
 
   // TODO: handle different phase
   if (roundNotificationSent_) {
@@ -229,13 +229,13 @@ void AllreduceGridFT2<T>::repairLeftPeer() {
   lock.unlock();
   leftPairCV_.notify_one();
 
-  std::cout << "finish" << std::endl;
+  DEBUG("finish");
 }
 
 
 template<typename T>
 void AllreduceGridFT2<T>::repairGroupPeer(int failedNodeRank) {
-  std::cout << "repair group peer" << std::endl;
+  DEBUG("repair group peer");
   std::unique_lock<std::mutex> lock(proxyMutex_);
   proxyCV_.wait(lock, [&]{ return phase_ == Completed;});
 
@@ -258,7 +258,7 @@ void AllreduceGridFT2<T>::repairGroupPeer(int failedNodeRank) {
     recvCrossGroupNotificationBufs_[peerRank] = pair->createRecvBuffer(slot + 2, &dummy_, sizeof(dummy_));
 
     recvRequestBufs[peerRank]->recv(peerRank, slot + 1);
-    std::cout << "wait requests from  " << peerRank << " (slot " << slot + 1 << ")" << std::endl;
+    DEBUG("wait requests from  " << peerRank << " (slot " << slot + 1 << ")");
   }
 
 
@@ -266,7 +266,7 @@ void AllreduceGridFT2<T>::repairGroupPeer(int failedNodeRank) {
     recvRequestBufs[peerRank]->waitRecv();
     int offset = requests[peerRank].offset;
     int length = requests[peerRank].length;
-    std::cout << "send data to " << peerRank << " (slot " << sendCrossGroupDataBufs_[peerRank]->getSlot() << ")" << std::endl;
+    DEBUG("send data to " << peerRank << " (slot " << sendCrossGroupDataBufs_[peerRank]->getSlot() << ")");
     sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
   }
 
@@ -274,13 +274,13 @@ void AllreduceGridFT2<T>::repairGroupPeer(int failedNodeRank) {
     recvCrossGroupNotificationBufs_[peerRank]->waitRecv();
   }
 
-  std::cout << "finish group peer" << std::endl;
+  DEBUG("finish group peer");
 }
 
 
 template<typename T>
 void AllreduceGridFT2<T>::repairCrossGroupPeer(int failedNodeRank) {
-  std::cout << "repair cross group peer" << std::endl;
+  DEBUG("repair cross group peer");
   std::unique_lock<std::mutex> lock(crossGroupMutex_);
   failedNodeRanks_.insert(failedNodeRank);
 
@@ -342,7 +342,7 @@ void AllreduceGridFT2<T>::repairCrossGroupPeer(int failedNodeRank) {
     auto& pair = this->getPair(peerRank);
 
     sendRequestBufs[peerRank]->send(peerRank, slot + 1);
-    std::cout << "send request to  " << peerRank << " (offset: " << offset << ", length: " << length << ")" << std::endl;
+    DEBUG("send request to  " << peerRank << " (offset: " << offset << ", length: " << length << ")");
 
     int localOffset = offset - allNodes_[peerRank].groupReduceOffset_;
     recvCrossGroupDataBufs_[peerRank] = pair->createRecvBuffer(slot, &inbox[localOffset], length * sizeof(T));
@@ -350,7 +350,7 @@ void AllreduceGridFT2<T>::repairCrossGroupPeer(int failedNodeRank) {
   }
 
   for (int peerRank : failedNodeGroupPeerRanks) {
-    std::cout << "wait data from " << peerRank << " (slot " << recvCrossGroupDataBufs_[peerRank]->getSlot() << ")" << std::endl;
+    DEBUG("wait data from " << peerRank << " (slot " << recvCrossGroupDataBufs_[peerRank]->getSlot() << ")");
     recvCrossGroupDataBufs_[peerRank]->waitRecv();
   }
 
@@ -366,7 +366,7 @@ void AllreduceGridFT2<T>::repairCrossGroupPeer(int failedNodeRank) {
     memcpy(&ptrs_[0][offset], &inbox[0], length * sizeof(T));
   }
 
-  std::cout << "finish cross group peer" << std::endl;
+  DEBUG("finish cross group peer");
 }
 
 
@@ -384,11 +384,11 @@ void AllreduceGridFT2<T>::proxyInGroupReduceScatter() {
   }
 
   if (proxy.startPhase_ <= InGroupReduceScatter && round_ >= proxy.startRound_) {
-    std::cout << "proxy wait notification" << std::endl;
+    DEBUG("proxy wait notification");
     proxy.recvRingNotificationBuf_->waitRecv();
   }
 
-  std::cout << "proxy send data at " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")" << std::endl;
+  DEBUG("proxy send data at " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")");
   proxy.sendRingDataBufs_[chunkOffset & 1]->send(localOffset * sizeof(T), length * sizeof(T));
 
   printElems(&proxy.ptrs_[0][0], 6);
@@ -411,11 +411,11 @@ void AllreduceGridFT2<T>::proxyInGroupAllGather() {
   if (round_ < (chunks_ - 4)) {
     if (proxy.startPhase_ < InGroupAllGather ||
         (proxy.startPhase_ == InGroupAllGather && round_ >= proxy.startRound_)) {
-      std::cout << "proxy wait notification" << std::endl;
+      DEBUG("proxy wait notification");
       proxy.recvRingNotificationBuf_->waitRecv();
     }
 
-    std::cout << "proxy send data at " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")" << std::endl;
+    DEBUG("proxy send data at " << chunkOffset << " ("  << proxy.ptrs_[0][localOffset] << ")");
     proxy.sendRingDataBufs_[chunkOffset & 1]->send(localOffset * sizeof(T), length * sizeof(T));
   }
 
@@ -440,7 +440,7 @@ void AllreduceGridFT2<T>::proxyCrossGroupAllGather() {
         context_->createUnboundBuffer(&requests[peerRank], sizeof(AllGatherRequest));
 
     recvRequestBufs[peerRank]->recv(peerRank, slot + 1);
-    std::cout << "wait requests from  " << peerRank << " (slot " << slot + 1 << ")" << std::endl;
+    DEBUG("wait requests from  " << peerRank << " (slot " << slot + 1 << ")");
   }
 
 
@@ -448,12 +448,12 @@ void AllreduceGridFT2<T>::proxyCrossGroupAllGather() {
     recvRequestBufs[peerRank]->waitRecv();
     int offset = requests[peerRank].offset;
     int length = requests[peerRank].length;
-    std::cout << "send data to " << peerRank << " (slot " << proxy.sendCrossGroupDataBufs_[peerRank]->getSlot() << ")" << std::endl;
+    DEBUG("send data to " << peerRank << " (slot " << proxy.sendCrossGroupDataBufs_[peerRank]->getSlot() << ")");
     proxy.sendCrossGroupDataBufs_[peerRank]->send(offset * sizeof(T), length * sizeof(T));
   }
 
   for (auto peerRank : getCrossGroupPeers(proxy.rank_)) {
-    std::cout << "wait notifs from  " << peerRank << " (slot " << proxy.recvCrossGroupNotificationBufs_[peerRank]->getSlot() << ")" << std::endl;
+    DEBUG("wait notifs from  " << peerRank << " (slot " << proxy.recvCrossGroupNotificationBufs_[peerRank]->getSlot() << ")");
     proxy.recvCrossGroupNotificationBufs_[peerRank]->waitRecv();
   }
 

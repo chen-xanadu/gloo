@@ -103,6 +103,10 @@ class Node {
 
 }
 
+#define DEBUG(x) do { \
+  if (debug) { std::cout << x << std::endl; } \
+} while (0)
+
 template <typename T>
 class AllreduceGridFT2 : public Algorithm {
 public:
@@ -243,7 +247,7 @@ protected:
     phase_ = CrossGroupReduceScatter;
 
     auto send = [&](std::unique_ptr<transport::Buffer>& buf, int dstRank, int offset, int length) {
-      std::cout << "send data " << " ("  << ptrs_[0][offset] << "...)"<< std::endl;
+      DEBUG("send data " << " ("  << ptrs_[0][offset] << "...)");
       bool success = buf->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
         if (!crossGroupRepairThread_.joinable()) {
@@ -255,7 +259,7 @@ protected:
 
     auto recv = [&](std::unique_ptr<transport::Buffer>& buf, int srcRank) {
       bool success = buf->tryWaitRecv();
-      std::cout << "recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)"<< std::endl;
+      DEBUG("recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)");
       if (!success) {
         if (!crossGroupRepairThread_.joinable()) {
           crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, srcRank);
@@ -346,9 +350,8 @@ protected:
     phase_ = InGroupReduceScatter;
 
     auto recvData = [&](int chunkOffset) {
-      std::cout << "wait data at " << chunkOffset;
-      std::unique_lock<std::mutex> lock(leftPairMutex_);
-      std::cout << "(acquire lock)" << std::endl;
+      DEBUG("wait data at " << chunkOffset);
+      std::unique_lock<std::mutex> lock(leftPairMutex_);\
       requestRoundData_ = true;
       roundNotificationSent_ = false;
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
@@ -363,7 +366,7 @@ protected:
     };
 
     auto sendNotification = [&]() {
-      std::cout << "send notification" << std::endl;
+      DEBUG("send notification");
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       bool success = sendRingNotificationBuf_->trySend();
       if (!success) {
@@ -377,7 +380,7 @@ protected:
 
     auto recvNotification = [&]() {
       if (!proxyNodes_.empty())  return;
-      std::cout << "wait notification" << std::endl;
+      DEBUG("wait notification");
       bool success = recvRingNotificationBuf_->tryWaitRecv();
       if (!success) {
         repairRightPeer(true);
@@ -386,7 +389,7 @@ protected:
 
     auto sendData = [&](int chunkOffset, int offset, int length) {
       if (!proxyNodes_.empty())  return;
-      std::cout << "send data at " << chunkOffset << " ("  << ptrs_[0][offset] << ")"<< std::endl;
+      DEBUG("send data at " << chunkOffset << " ("  << ptrs_[0][offset] << ")");
       bool success = sendRingDataBufs_[chunkOffset & 1]->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
         repairRightPeer();
@@ -411,7 +414,7 @@ protected:
     }
 
     for (round_ = 2; round_ < chunks_; round_++) {
-      std::cout << "in-group reduce-scatter round " << round_ << std::endl;
+      DEBUG("in-group reduce-scatter round " << round_);
 
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
@@ -450,7 +453,7 @@ protected:
     phase_ = InGroupAllGather;
 
     auto recvData = [&](int chunkOffset) {
-      std::cout << "wait data at " << chunkOffset << std::endl;
+      DEBUG("wait data at " << chunkOffset);
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       requestRoundData_ = true;
       roundNotificationSent_ = false;
@@ -466,7 +469,7 @@ protected:
     };
 
     auto sendNotification = [&]() {
-      std::cout << "send notification" << std::endl;
+      DEBUG("send notification");
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       bool success = sendRingNotificationBuf_->trySend();
       if (!success) {
@@ -480,7 +483,7 @@ protected:
 
     auto recvNotification = [&]() {
       if (!proxyNodes_.empty())  return;
-      std::cout << "wait notification" << std::endl;
+      DEBUG("wait notification");
       bool success = recvRingNotificationBuf_->tryWaitRecv();
       if (!success) {
         repairRightPeer(true);
@@ -489,7 +492,7 @@ protected:
 
     auto sendData = [&](int chunkOffset, int offset, int length) {
       if (!proxyNodes_.empty())  return;
-      std::cout << "send data at " << chunkOffset << std::endl;
+      DEBUG("send data at " << chunkOffset << " ("  << ptrs_[0][offset] << ")");
       bool success = sendRingDataBufs_[chunkOffset & 1]->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
         repairRightPeer();
@@ -497,7 +500,7 @@ protected:
     };
 
     for (round_ = 0; round_ < (chunks_ - 2); round_++) {
-      std::cout << "in-group all-gather round " << round_ << std::endl;
+      DEBUG("in-group all-gather round " << round_);
       insertFailure();
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
@@ -545,7 +548,7 @@ protected:
     phase_ = CrossGroupAllGather;
 
     auto send = [&](std::unique_ptr<transport::Buffer>& buf, int dstRank, int offset, int length) {
-      std::cout << "send data " << " ("  << ptrs_[0][offset] << "...)"<< std::endl;
+      DEBUG("send data " << " ("  << ptrs_[0][offset] << "...)");
       bool success = buf->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
         if (!crossGroupRepairThread_.joinable()) {
@@ -557,7 +560,7 @@ protected:
 
     auto recv = [&](std::unique_ptr<transport::Buffer>& buf, int srcRank) {
       bool success = buf->tryWaitRecv();
-      std::cout << "recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)"<< std::endl;
+      DEBUG("recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)");
       if (!success) {
         if (!crossGroupRepairThread_.joinable()) {
           crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, srcRank);
@@ -618,7 +621,7 @@ protected:
 
 
   void recoveryFunction() {
-    std::cout << "Recovery start" << std::endl;
+    DEBUG("Recovery start" );
     std::vector<int> allRanks(contextSize_);
     for (int rank = 0; rank < contextSize_; ++rank) {
       if (rank != myRank_) {
@@ -629,7 +632,7 @@ protected:
     while (numNodeCompleted + failedNodeRanks_.size() != contextSize_ - 1) {
       recoveryNotificationBuf_->recv(allRanks, recoverySlotOffset_ + myRank_);
       recoveryNotificationBuf_->waitRecv();
-      std::cout << "Unbounded message: " << recvMsg_ << std::endl;
+      DEBUG("Unbounded message: " << recvMsg_);
       if (recvMsg_ >= 0) {
         int rank = recvMsg_;
         failedNodeRanks_.insert(rank);
@@ -648,7 +651,7 @@ protected:
       }
     }
 
-    std::cout << "Recovery finished" << std::endl;
+    DEBUG("Recovery finished");
   }
 
   void signalNodeFailure(int rank) {
@@ -665,7 +668,7 @@ protected:
   }
 
   void signalCompletion() {
-    std::cout << "COMPLETED" << std::endl;
+    DEBUG("COMPLETED");
     sendMsg_ = -1;
     std::vector<std::unique_ptr<transport::UnboundBuffer>> notifs;
     for (int dstRank : getAvailablePeerRanks()) {
@@ -891,10 +894,11 @@ protected:
 
 
  private:
+  bool debug = false;
   static constexpr int wordsPerSection = 2;
   static constexpr int wordsPerLine = 3 * wordsPerSection;
 
-  static void printBreak(T* p, int x) {
+  void printBreak(T* p, int x) {
     if (0 == x % wordsPerLine) {
       std::cout << std::endl
                 << &p[x] << " " << std::setfill('0') << std::setw(3) << x
@@ -904,7 +908,9 @@ protected:
     }
   }
 
-  static void printElems(T* p, int count, int start = 0) {
+  void printElems(T* p, int count, int start = 0) {
+    if (!debug)
+      return;
     auto alignedStart = (start / wordsPerLine) * wordsPerLine;
     for (int x = alignedStart; x < start + count; ++x) {
       printBreak(p, x);
@@ -918,6 +924,8 @@ protected:
   }
 
   void printAddr() {
+    if (!debug)
+      return;
     for (int i = 0; i < contextSize_; i++) {
       if (i == contextRank_) continue;
       auto &pair = context_->getPair(i);
