@@ -26,7 +26,7 @@ class Context {
   const int rank;
   const int size;
   int base;
-  int groups = 3;
+  int groups;
 
   std::set<int> failedNodeRanks;
 

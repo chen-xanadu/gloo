@@ -166,6 +166,7 @@ void Buffer::send(size_t offset, size_t length, size_t roffset) {
 
 bool Buffer::trySend(size_t offset, size_t length, size_t roffset) {
   try {
+    pair_->verifyConnected();
     send(offset, length, roffset);
   } catch (...) {
     std::cout << "send exception caught: " << this->pair_->address().str() << std::endl;

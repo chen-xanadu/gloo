@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
 
 #include "gloo/algorithm.h"
 #include "gloo/context.h"
@@ -104,7 +105,7 @@ class Node {
 }
 
 #define DEBUG(x) do { \
-  if (debug) { std::cout << x << std::endl; } \
+  if (debug_) { std::cout << x << std::endl; } \
 } while (0)
 
 template <typename T>
@@ -117,7 +118,7 @@ public:
       const ReductionFunction<T>* fn = ReductionFunction<T>::sum)
       : Algorithm(context),
         myRank_(context_->rank),
-        groups_(context->groups),
+        groups_(context_->groups),
         ptrs_(ptrs),
         totalNumElems_(count),
         bytes_(totalNumElems_ * sizeof(T)),
@@ -184,11 +185,18 @@ public:
     recoverySlotOffset_ = this->context_->nextSlot(contextSize_);
     requestSlotOffset_ = this->context_->nextSlot(contextSize_);
     recoveryNotificationBuf_ = context_->createUnboundBuffer(&recvMsg_, sizeof(recvMsg_));
-    recoveryThread_ = std::thread(&AllreduceGridFT2::recoveryFunction, this);
 
   }
 
   virtual ~AllreduceGridFT2() {
+  }
+
+  void setDebug(bool debug) {
+    this->debug_ = debug;
+  }
+
+  void setFail(int fail) {
+    this->fail_ = fail;
   }
 
   void run() {
@@ -204,16 +212,29 @@ public:
       }
       return;
     }
+    init();
     printAddr();
 
+//    auto start = std::chrono::system_clock::now();
     crossGroupReduceScatter();
-    printElems(&ptrs_[0][0], totalNumElems_);
+//    auto p1 = std::chrono::system_clock::now();
+//    auto d = std::chrono::duration_cast<std::chrono::milliseconds>(p1 - start).count();
+//    std::cout << "Phase 1: " << d << std::endl;
 
     inGroupReduceScatter();
+//    auto p2 = std::chrono::system_clock::now();
+//    d = std::chrono::duration_cast<std::chrono::milliseconds>(p2 - p1).count();
+//    std::cout << "Phase 2: " << d << std::endl;
 
     inGroupAllGather();
+//    auto p3 = std::chrono::system_clock::now();
+//    d = std::chrono::duration_cast<std::chrono::milliseconds>(p3 - p2).count();
+//    std::cout << "Phase 3: " << d << std::endl;
 
     crossGroupAllGather();
+//    auto p4 = std::chrono::system_clock::now();
+//    d = std::chrono::duration_cast<std::chrono::milliseconds>(p4 - p3).count();
+//    std::cout << "Phase 4: " << d << std::endl;
 
 
     if (leftPairRepairThread_.joinable()) {
@@ -234,6 +255,10 @@ public:
     recoveryThread_.join();
     context_->updateFailedNodes(failedNodeRanks_);
 
+//    auto end = std::chrono::system_clock::now();
+//    d = std::chrono::duration_cast<std::chrono::milliseconds>(end - p4).count();
+//    std::cout << "End: " << d << std::endl;
+
     // Broadcast ptrs_[0]
     for (int i = 1; i < ptrs_.size(); i++) {
       memcpy(ptrs_[i], ptrs_[0], bytes_);
@@ -242,7 +267,33 @@ public:
 
 
 protected:
+  void init() {
+    grid::Node& myNode = allNodes_[myRank_];
+    failedNodeRanks_ .insert(context_->failedNodeRanks.begin(), context_->failedNodeRanks.end());
+    for (int failNodeRank : failedNodeRanks_) {
+      if (isCrossGroupPeers(myRank_, failNodeRank)) {
+        std::unique_lock<std::mutex> lock(crossGroupMutex_);
+        crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeerOnStartup, this, failNodeRank);
+        crossGroupCV_.wait(lock);
+        lock.unlock();
+      }
+      if (isGroupPeers(myRank_, failNodeRank)) {
+        if (myNode.leftPeerRank_ == failNodeRank) {
+          repairLeftPeerOnStartup();
+        }
+        if (myNode.rightPeerRank_ == failNodeRank) {
+          repairRightPeerOnStartup();
+        } else {
+          proxyThreads_.emplace_back(&AllreduceGridFT2::repairGroupPeer, this, failNodeRank);
+        }
+      }
+    }
+
+    recoveryThread_ = std::thread(&AllreduceGridFT2::recoveryFunction, this);
+  }
+
   void crossGroupReduceScatter() {
+    insertFailure1();
     std::unique_lock<std::mutex> lock(crossGroupMutex_);
     phase_ = CrossGroupReduceScatter;
 
@@ -250,9 +301,6 @@ protected:
       DEBUG("send data " << " ("  << ptrs_[0][offset] << "...)");
       bool success = buf->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
-        if (!crossGroupRepairThread_.joinable()) {
-          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, dstRank);
-        }
         crossGroupCV_.wait(lock);
       }
     };
@@ -261,9 +309,6 @@ protected:
       bool success = buf->tryWaitRecv();
       DEBUG("recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)");
       if (!success) {
-        if (!crossGroupRepairThread_.joinable()) {
-          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, srcRank);
-        }
         crossGroupCV_.wait(lock);
       }
       return success;
@@ -274,9 +319,6 @@ protected:
       for (auto peerRank : getCrossGroupPeers(myRank_)) {
         bool success = sendConfirmationBufs_[peerRank]->trySend();
         if (!success) {
-          if (!crossGroupRepairThread_.joinable()) {
-            crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, peerRank);
-          }
           crossGroupCV_.wait(lock);
         }
       }
@@ -284,9 +326,6 @@ protected:
       for (auto peerRank : getCrossGroupPeers(myRank_)) {
         bool success = recvConfirmationBufs_[peerRank]->tryWaitRecv();
         if (!success) {
-          if (!crossGroupRepairThread_.joinable()) {
-            crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, peerRank);
-          }
           crossGroupCV_.wait(lock);
         } else {
           if (msg_[peerRank] != peerRank) {
@@ -312,7 +351,7 @@ protected:
       send(sendBackupDataBuf_, sendBackupPeerRank, offset, length);
     }
 
-    for (auto peerRank : getCrossGroupPeers(myRank_)) {
+    for (auto peerRank : getCrossGroupPeers(myRank_, true)) {
       recv(recvCrossGroupDataBufs_[peerRank], peerRank);
     }
 
@@ -355,7 +394,6 @@ protected:
       requestRoundData_ = true;
       roundNotificationSent_ = false;
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
-      std::cout << " ("  << ringInbox_[chunkOffset & 1][0] << ")" << std::endl;
       if (!success) {
 //        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
         leftPairCV_.wait(lock);
@@ -414,6 +452,7 @@ protected:
     }
 
     for (round_ = 2; round_ < chunks_; round_++) {
+      insertFailure2();
       DEBUG("in-group reduce-scatter round " << round_);
 
       int chunkOffset, offset, length;
@@ -460,7 +499,6 @@ protected:
       bool success = recvRingDataBufs_[chunkOffset & 1]->tryWaitRecv();
       if (!success) {
         // TODO: handle existing repair thread
-//        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, true);
         leftPairCV_.wait(lock);
         recvRingDataBufs_[chunkOffset & 1]->waitRecv();
       }
@@ -473,7 +511,6 @@ protected:
       std::unique_lock<std::mutex> lock(leftPairMutex_);
       bool success = sendRingNotificationBuf_->trySend();
       if (!success) {
-//        leftPairRepairThread_ = std::thread(&AllreduceGridFT2::repairLeftPeer, this, false);
         leftPairCV_.wait(lock);
         sendRingNotificationBuf_->send();
       }
@@ -501,7 +538,7 @@ protected:
 
     for (round_ = 0; round_ < (chunks_ - 2); round_++) {
       DEBUG("in-group all-gather round " << round_);
-      insertFailure();
+      insertFailure3();
       int chunkOffset, offset, length;
       std::tie(chunkOffset, offset, length) = getChunkPosPerRound(myRank_, round_);
 
@@ -551,9 +588,9 @@ protected:
       DEBUG("send data " << " ("  << ptrs_[0][offset] << "...)");
       bool success = buf->trySend(offset * sizeof(T), length * sizeof(T));
       if (!success) {
-        if (!crossGroupRepairThread_.joinable()) {
-          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, dstRank);
-        }
+//        if (!crossGroupRepairThread_.joinable()) {
+//          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, dstRank);
+//        }
         crossGroupCV_.wait(lock);
       }
     };
@@ -562,9 +599,9 @@ protected:
       bool success = buf->tryWaitRecv();
       DEBUG("recv data " << " ("  << crossGroupInbox_[srcRank][0] << "...)");
       if (!success) {
-        if (!crossGroupRepairThread_.joinable()) {
-          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, srcRank);
-        }
+//        if (!crossGroupRepairThread_.joinable()) {
+//          crossGroupRepairThread_ = std::thread(&AllreduceGridFT2::repairCrossGroupPeer, this, srcRank);
+//        }
         crossGroupCV_.wait(lock);
       }
       return success;
@@ -578,7 +615,7 @@ protected:
       }
     }
 
-    for (auto peerRank : getCrossGroupPeers(myRank_)) {
+    for (auto peerRank : getCrossGroupPeers(myRank_, true)) {
       int offset = allNodes_[peerRank].groupReduceOffset_;
       int length = allNodes_[peerRank].groupReduceNumElems_;
       bool success = recv(recvCrossGroupDataBufs_[peerRank], peerRank);
@@ -682,19 +719,29 @@ protected:
 
   void repairRightPeer(bool requestNotification = false);
 
-
   void repairLeftPeer();
-
 
   void repairGroupPeer(int failedNodeRank);
 
-
   void repairCrossGroupPeer(int failedNodeRank);
 
-  std::vector<int> getCrossGroupPeers(int rank) {
+  void repairRightPeerOnStartup();
+
+  void repairLeftPeerOnStartup();
+
+  void repairCrossGroupPeerOnStartup(int failedNodeRank);
+
+  std::vector<int> getCrossGroupPeers(int rank, bool reverse = false) {
     std::vector<int> peerRanks;
-    for (auto& kv : allNodes_[rank].crossGroupPeerRanks_) {
-      peerRanks.push_back(kv.second);
+    grid::Node& node = allNodes_[rank];
+    for (int group = node.group_ + 1; group < node.group_ + groups_; group++) {
+      if (node.crossGroupPeerRanks_.find(group % groups_) != node.crossGroupPeerRanks_.end()) {
+        peerRanks.push_back(allNodes_[rank].crossGroupPeerRanks_[group % groups_]);
+      }
+    }
+
+    if (reverse) {
+      std::reverse(peerRanks.begin(), peerRanks.end());
     }
     return peerRanks;
   }
@@ -894,7 +941,8 @@ protected:
 
 
  private:
-  bool debug = false;
+  bool debug_ = false;
+  int fail_ = 0;
   static constexpr int wordsPerSection = 2;
   static constexpr int wordsPerLine = 3 * wordsPerSection;
 
@@ -909,7 +957,7 @@ protected:
   }
 
   void printElems(T* p, int count, int start = 0) {
-    if (!debug)
+    if (!debug_)
       return;
     auto alignedStart = (start / wordsPerLine) * wordsPerLine;
     for (int x = alignedStart; x < start + count; ++x) {
@@ -924,7 +972,7 @@ protected:
   }
 
   void printAddr() {
-    if (!debug)
+    if (!debug_)
       return;
     for (int i = 0; i < contextSize_; i++) {
       if (i == contextRank_) continue;
@@ -933,13 +981,36 @@ protected:
     }
   }
 
-  void insertFailure() {
-    if (round_ == 2) {
+  void insertFailure1() {
+    if (fail_ != 1)
+      return;
+    if (myRank_ == 1) {
+      std::cout << "Fail 1" << std::endl;
+      exit(0);
+    }
+
+  }
+
+  void insertFailure2() {
+    if (fail_ != 2)
+      return;
+    if (round_ == 4) {
       if (myRank_ == 1) {
+        std::cout << "Fail 2" << std::endl;
         exit(0);
       }
     }
+  }
 
+  void insertFailure3() {
+    if (fail_ != 3)
+      return;
+    if (round_ == 4) {
+      if (myRank_ == 1) {
+        std::cout << "Fail 3" << std::endl;
+        exit(0);
+      }
+    }
   }
 };
 

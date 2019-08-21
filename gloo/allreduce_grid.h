@@ -142,7 +142,8 @@ class AllreduceGrid : public Algorithm {
       return;
     }
 
-    std::cout << "---- Starting initial copying ----" << std::endl;
+    auto start = std::chrono::system_clock::now();
+    //std::cout << "---- Starting initial copying ----" << std::endl;
     for (int i = 0; i < groups_ - 1; i++) {
       auto chunkOffset = (groupId_ + i + 1) % groups_;
       auto offset = chunkOffset * reduceCount_;
@@ -190,7 +191,7 @@ class AllreduceGrid : public Algorithm {
 
     syncRow();
 
-    std::cout << "---- Starting in-group allreduce phase 1 ----" << std::endl;
+//    std::cout << "---- Starting in-group allreduce phase 1 ----" << std::endl;
 
     // Kick off copying initial chunks
     copyChunkAtOffset(2 * this->groupRank_);
@@ -246,7 +247,7 @@ class AllreduceGrid : public Algorithm {
     }
 
 
-    std::cout << "---- Starting in-group allreduce phase 2 ----" << std::endl;
+//    std::cout << "---- Starting in-group allreduce phase 2 ----" << std::endl;
 
     // Second pass around the ring to broadcast result.
     // End at chunks_-2 since that's where the accumulation
@@ -306,7 +307,7 @@ class AllreduceGrid : public Algorithm {
     recvNotificationBuf_->waitRecv();
 
 
-    std::cout << "---- Starting final copying ----" << std::endl;
+//    std::cout << "---- Starting final copying ----" << std::endl;
     for (int i = 0; i < groups_ - 1; i++) {
       auto offset = reduceOffset_;
       auto length = reduceCount_;
