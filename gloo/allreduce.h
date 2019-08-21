@@ -17,7 +17,8 @@
 #include "gloo/transport/unbound_buffer.h"
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
-#include "allreduce_grid_ft2.h"
+#include "gloo/allreduce_grid_ft2.h"
+#include "gloo/allreduce_grid_ft2.cc"
 
 namespace gloo {
 
