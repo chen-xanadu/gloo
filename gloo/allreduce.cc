@@ -666,7 +666,8 @@ void bcube(
 } // namespace
 
 void allreduce(const AllreduceOptions& opts) {
-  allreduce(opts.impl_);
+  opts.algo_->run();
+//  allreduce(opts.impl_);
 }
 
 } // namespace gloo

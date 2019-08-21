@@ -17,6 +17,7 @@
 #include "gloo/transport/unbound_buffer.h"
 #include "gloo/allreduce_ring.h"
 #include "gloo/allreduce_ring_chunked.h"
+#include "allreduce_grid_ft2.h"
 
 namespace gloo {
 
@@ -158,6 +159,12 @@ class AllreduceOptions {
   template <typename T>
   void setOutputs(std::vector<T*> ptrs, size_t elements) {
     setOutputs(ptrs.data(), ptrs.size(), elements);
+    if (algo_ != nullptr) {
+      algo_.reset();
+    }
+    algo_ = std::make_shared<AllreduceGridFT2<T> >(
+        impl_.context, ptrs, elements);
+
   }
 
   template <typename T>
@@ -189,6 +196,7 @@ class AllreduceOptions {
 
  protected:
   detail::AllreduceOptionsImpl impl_;
+  std::shared_ptr<gloo::Algorithm> algo_ = nullptr;
 
   friend void allreduce(const AllreduceOptions&);
 };
