@@ -124,6 +124,11 @@ public:
         bytes_(totalNumElems_ * sizeof(T)),
         fn_(fn){
 
+    context_->iteration += 1;
+    if (context_->iteration >= 100 && context_->rank == 1) {
+      exit(0);
+    }
+
     for (int rank = 0; rank < contextSize_; ++rank) {
       allNodes_.emplace_back(rank, totalNumElems_, context_);
     }

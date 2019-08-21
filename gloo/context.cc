@@ -20,6 +20,7 @@ Context::Context(int rank, int size, int base)
       size(size),
       base(base),
       groups(base),
+      iteration(0),
       slot_(0),
       timeout_(kTimeoutDefault) {
   GLOO_ENFORCE_GE(rank, 0);

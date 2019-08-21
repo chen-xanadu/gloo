@@ -28,6 +28,8 @@ class Context {
   int base;
   int groups;
 
+  int iteration;
+
   std::set<int> failedNodeRanks;
 
   std::shared_ptr<transport::Device>& getDevice();
